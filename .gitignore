@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Coverage
+coverage/
+
+# Environment files
+.env
+.env.local
+.env.staging
+.env.production
+!.env.example
+!.env.staging.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*-report.json
+*-test-results.md
+test-report.md
+temp-*.json
+lint-results.json
+
+# Prisma
+prisma/migrations/**/migration_lock.toml
+
+# Misc
+*.tsbuildinfo

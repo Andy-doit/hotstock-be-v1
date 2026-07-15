@@ -1,0 +1,258 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  user
+  admin
+  editor
+}
+
+model User {
+  id                Int            @id @default(autoincrement())
+  email             String         @unique
+  username          String
+  fullName          String?
+  phoneNumber       String?
+  passwordHash      String
+  role              Role           @default(user)
+  provider          String         @default("local")
+  confirmed         Boolean        @default(true)
+  blocked           Boolean        @default(false)
+  termsAccepted     Boolean        @default(false)
+  termsAcceptedAt   DateTime?
+  personalDataConsent Boolean      @default(false)
+  personalDataConsentAt DateTime?
+  resetPasswordOtp  String?
+  resetPasswordExpires DateTime?
+  passwordChangedAt DateTime?
+  planId            Int?
+  plan              Plan?          @relation(fields: [planId], references: [id])
+  refreshTokens     RefreshToken[]
+  auditLogs         AuditLog[]
+  articles          Article[]
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+}
+
+model RefreshToken {
+  id        Int       @id @default(autoincrement())
+  tokenHash String    @unique
+  userId    Int
+  user      User      @relation(fields: [userId], references: [id])
+  expiresAt DateTime
+  revokedAt DateTime?
+  userAgent String?
+  ipAddress String?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Plan {
+  id                    Int                      @id @default(autoincrement())
+  name                  String
+  slug                  String                   @unique
+  level                 Int
+  tagline               String?
+  icon                  String?
+  theme                 String                   @default("dark")
+  badge                 String?
+  monthlyPrice          Float
+  semiAnnualPrice       Float?
+  originalPrice         Float?
+  discountPercent       Int?
+  description           String?
+  features              Json
+  ctaLabel              String?
+  isPopular             Boolean                  @default(false)
+  highlighted           Boolean                  @default(false)
+  isActive              Boolean                  @default(true)
+  sortOrder             Int                      @default(0)
+  users                 User[]
+  articles              ArticlePlan[]
+  portfolios            Portfolio[]
+  fieldVisibilities     PlanFieldVisibility?
+  createdAt             DateTime                 @default(now())
+  updatedAt             DateTime                 @updatedAt
+}
+
+model PlanFieldVisibility {
+  id                    Int       @id @default(autoincrement())
+  planId                Int       @unique
+  plan                  Plan      @relation(fields: [planId], references: [id], onDelete: Cascade)
+  
+  // Dashboard content/descriptions
+  dashboardTitle        String?
+  dashboardDescription  String?
+  performanceTitle      String?
+  performanceDescription String?
+  portfolioCompositionTitle String?
+  portfolioCompositionDescription String?
+  targetInfoTitle       String?
+  targetInfoDescription String?
+  analysisTitle         String?
+  analysisDescription   String?
+  portfolioTableTitle   String?
+  portfolioTableDescription String?
+  
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+}
+
+model Category {
+  id            Int       @id @default(autoincrement())
+  name          String
+  slug          String    @unique
+  isVisibleOnUI Boolean   @default(true)
+  articles      Article[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model Tag {
+  id       Int       @id @default(autoincrement())
+  name     String
+  slug     String    @unique
+  articles Article[]
+}
+
+model Author {
+  id        Int     @id @default(autoincrement())
+  name      String
+  bio       String?
+  avatarUrl String?
+}
+
+model Article {
+  id             Int           @id @default(autoincrement())
+  title          String
+  description    String
+  slug           String        @unique
+  publishedAt    DateTime?
+  contentBlocks  Json
+  coverUrl       String?
+  readPermission String        @default("public")
+  categoryId     Int
+  category       Category      @relation(fields: [categoryId], references: [id])
+  tags           Tag[]
+  authorId       Int?
+  author         User?         @relation(fields: [authorId], references: [id])
+  plans          ArticlePlan[]
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([publishedAt(sort: Desc)])
+  @@index([categoryId, publishedAt(sort: Desc)])
+}
+
+model ArticlePlan {
+  articleId Int
+  planId    Int
+  article   Article @relation(fields: [articleId], references: [id])
+  plan      Plan    @relation(fields: [planId], references: [id])
+
+  @@id([articleId, planId])
+}
+
+model Portfolio {
+  id          Int                    @id @default(autoincrement())
+  planId      Int
+  plan        Plan                   @relation(fields: [planId], references: [id])
+  publishedAt DateTime
+  stocks      PortfolioStock[]
+  information PortfolioInformation[]
+  reasons     PortfolioReason[]
+  signals     PortfolioSignal[]
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+
+  @@index([planId, publishedAt(sort: Desc)])
+}
+
+model PortfolioStock {
+  id           Int       @id @default(autoincrement())
+  portfolioId  Int
+  portfolio    Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  symbol       String
+  sector       String?
+  purchaseDate DateTime
+  costBasis    Float
+  marketPrice  Float
+  quantity     Int
+  note         String?
+
+  @@index([portfolioId])
+  @@index([symbol])
+}
+
+model PortfolioInformation {
+  id              Int       @id @default(autoincrement())
+  portfolioId     Int
+  portfolio       Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  month           String
+  vnindexReturn   Float
+  recommendReturn Float
+
+  @@index([portfolioId])
+}
+
+model PortfolioReason {
+  id          Int       @id @default(autoincrement())
+  portfolioId Int
+  portfolio   Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  type        String
+  symbol      String
+  content     String
+
+  @@index([portfolioId])
+}
+
+model PortfolioSignal {
+  id          Int       @id @default(autoincrement())
+  portfolioId Int
+  portfolio   Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  symbol      String
+  signalType  String
+  description String
+  targetPrice Float?
+  stopLoss    Float?
+
+  @@index([portfolioId])
+  @@index([symbol])
+}
+
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  userId     Int?
+  user       User?    @relation(fields: [userId], references: [id])
+  action     String
+  resource   String
+  resourceId String?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+model SiteSetting {
+  id        Int      @id @default(autoincrement())
+  key       String   @unique
+  value     String
+  label     String?
+  group     String   @default("general")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([group])
+}
