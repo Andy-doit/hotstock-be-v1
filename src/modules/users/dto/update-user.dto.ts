@@ -1,8 +1,17 @@
-import { IsString, IsOptional, MinLength, MaxLength, Matches } from 'class-validator';
+import {
+  IsString,
+  IsOptional,
+  MinLength,
+  MaxLength,
+  Matches,
+} from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
 export class UpdateUserDto {
-  @ApiPropertyOptional({ example: 'johndoe123', description: 'Tên người dùng mới' })
+  @ApiPropertyOptional({
+    example: 'johndoe123',
+    description: 'Tên người dùng mới',
+  })
   @IsString()
   @MinLength(3, { message: 'Tên người dùng phải có ít nhất 3 ký tự' })
   @MaxLength(50, { message: 'Tên người dùng không được quá 50 ký tự' })

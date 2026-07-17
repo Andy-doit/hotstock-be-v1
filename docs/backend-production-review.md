@@ -18,7 +18,7 @@
 - Updated the main `Dockerfile` to use the built-in `node` (UID 1000) user rather than creating a new custom user, aligning with best practices.
 - Used `npm ci --omit=dev` instead of the deprecated `--only=production` flag to reduce layer size.
 - Ensure only required files are copied for the final `runner` stage and removed unnecessary global permissions `chown -R` on the `/app` directory since read-only files don't need ownership changes.
-- Validated the `HEALTHCHECK` endpoint path pointing to `http://127.0.0.1:3000/api/v1/health` and verified it's accurately referencing the health controller.
+- Validated the `HEALTHCHECK` endpoint path pointing to `http://127.0.0.1:3000/api/v1/health`. The Docker image listens on internal port `3000`; local compose maps host `3001` to container `3000`.
 - **Benefit:** More secure (non-root) execution, smaller image sizes, faster deployments.
 
 ## 4. Database Indexing & Constraints

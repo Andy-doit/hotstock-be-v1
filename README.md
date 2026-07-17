@@ -19,10 +19,10 @@ Cap nhat cac bien toi thieu trong `.env`:
 
 ```env
 NODE_ENV=development
-PORT=3001
+PORT=3000
 API_PREFIX=api/v1
 APP_URL=http://localhost:3000
-CORS_ORIGINS=http://localhost:3000
+CORS_ORIGINS=http://localhost:3001
 
 POSTGRES_DB=appdb
 POSTGRES_USER=postgres
@@ -46,8 +46,10 @@ Luu y:
 
 - `JWT_ACCESS_SECRET` phai trung voi frontend.
 - `JWT_ACCESS_SECRET` va `JWT_REFRESH_SECRET` can toi thieu 32 ky tu.
-- Neu can email that, cau hinh them cac bien `SMTP_*`.
-- Neu can upload S3 that, cau hinh them cac bien `AWS_*`.
+- Neu can email that, cau hinh them cac bien `SMTP_*`. Dat `SMTP_SECURE=true`
+  cho SMTP 465/TLS ngay tu dau ket noi; voi port 587/STARTTLS thi dung
+  `SMTP_SECURE=false`. Neu bo trong, he thong tu bat secure khi `SMTP_PORT=465`.
+- Cac bien `AWS_*` hien la optional vi backend chua co upload controller active.
 
 ## Development
 
@@ -74,7 +76,7 @@ npm run start:dev
 Kiem tra:
 
 ```text
-GET http://localhost:3001/api/v1/health
+GET http://localhost:3000/api/v1/health
 ```
 
 ## Docker
@@ -108,7 +110,7 @@ GET /api/v1/health
 Swagger chi bat khi `NODE_ENV !== production`:
 
 ```text
-http://localhost:3001/api/docs
+http://localhost:3000/api/docs
 ```
 
 Khong commit file swagger/postman collection generated vao repo.

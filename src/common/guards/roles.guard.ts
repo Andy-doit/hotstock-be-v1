@@ -6,17 +6,12 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Role } from '@prisma/client';
+import { FastifyRequest } from 'fastify';
 import { ROLES_KEY } from '../decorators/roles.decorator';
 import { JwtPayload } from '../../modules/auth/interfaces/jwt-payload.interface';
 
-/**
- * Guard that checks if the authenticated user has one of the required roles.
- * Must be used AFTER JwtAuthGuard so that request.user is populated.
- *
- * Usage:
- *   @UseGuards(JwtAuthGuard, RolesGuard)
- *   @Roles(Role.admin, Role.editor)
- */
+type AuthenticatedRequest = FastifyRequest & { user?: JwtPayload };
+
 @Injectable()
 export class RolesGuard implements CanActivate {
   constructor(private readonly reflector: Reflector) {}
@@ -26,16 +21,14 @@ export class RolesGuard implements CanActivate {
       ROLES_KEY,
       [context.getHandler(), context.getClass()],
     );
-
-    // If no @Roles() decorator is set, allow through
     if (!requiredRoles || requiredRoles.length === 0) {
       return true;
     }
 
-    const request = context.switchToHttp().getRequest();
-    const user = request.user as JwtPayload;
+    const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
+    const userRole = request.user?.role as Role | undefined;
 
-    if (!user || !requiredRoles.includes(user.role as Role)) {
+    if (!userRole || !requiredRoles.includes(userRole)) {
       throw new ForbiddenException(
         'Bạn không có quyền thực hiện hành động này',
       );

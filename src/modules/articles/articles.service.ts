@@ -6,37 +6,49 @@ import {
   Inject,
   Logger,
 } from '@nestjs/common';
-import { Article, Prisma } from '@prisma/client';
+import { Prisma, Role } from '@prisma/client';
 import Redis from 'ioredis';
 import { PrismaService } from '../../prisma/prisma.service';
 import { clearCache } from '../../common/interceptors/cache.interceptor';
-import { CreateArticleDto } from './dto/create-article.dto';
+import {
+  ArticleContentBlockDto,
+  CreateArticleDto,
+} from './dto/create-article.dto';
 import { UpdateArticleDto } from './dto/update-article.dto';
 import { ArticleListQueryDto } from './dto/article-list-query.dto';
 import {
   ArticleListItem,
-  ArticleListItemResponse,
+  ArticleDetailResponse,
   PaginatedArticlesResponse,
 } from './dto/article-response.dto';
 import { safeJsonParse } from '../../common/utils/safe-json-parse';
 
-// Prisma return type with relations
-type ArticleWithRelations = Prisma.ArticleGetPayload<{
-  include: {
-    category: true;
-    tags: true;
-    author: { select: { id: true; name: true; avatarUrl: true } };
-  };
+const articleDetailSelect = Prisma.validator<Prisma.ArticleSelect>()({
+  id: true,
+  title: true,
+  description: true,
+  slug: true,
+  publishedAt: true,
+  coverUrl: true,
+  contentBlocks: true,
+  createdAt: true,
+  updatedAt: true,
+  category: { select: { id: true, name: true, slug: true } },
+  tags: { select: { id: true, name: true, slug: true } },
+  author: { select: { id: true, username: true } },
+  plans: {
+    select: {
+      planId: true,
+      plan: { select: { slug: true, level: true } },
+    },
+  },
+});
+
+type ArticleDetailRecord = Prisma.ArticleGetPayload<{
+  select: typeof articleDetailSelect;
 }>;
 
-type ArticleWithPlans = Prisma.ArticleGetPayload<{
-  include: {
-    plans: { include: { plan: true } };
-    category: true;
-    tags: true;
-    author: true;
-  };
-}>;
+const ARTICLE_LIST_CACHE_SCHEMA_VERSION = 'v2';
 
 @Injectable()
 export class ArticlesService {
@@ -47,15 +59,14 @@ export class ArticlesService {
     @Inject('REDIS_CLIENT') private readonly redis: Redis,
   ) {}
 
-  // ─── FIND ALL (Paginated) ─────────────────────────────────────────────────
-
-  async findAll(query: ArticleListQueryDto): Promise<PaginatedArticlesResponse> {
-    const limit = Math.min(query.limit ?? 20, 100); // cap at 100
+  async findAll(
+    query: ArticleListQueryDto,
+  ): Promise<PaginatedArticlesResponse> {
+    const limit = Math.min(query.limit ?? 20, 100);
     const cursor = query.cursor;
     const categorySlug = query.category;
 
-    // Check service-level cache
-    const cacheKey = `articles:list:${categorySlug ?? 'all'}:${cursor ?? 0}:${limit}`;
+    const cacheKey = `articles:list:${ARTICLE_LIST_CACHE_SCHEMA_VERSION}:${categorySlug ?? 'all'}:${cursor ?? 0}:${limit}`;
     const cached = await this.redis.get(cacheKey);
     if (cached) {
       const parsed = safeJsonParse<PaginatedArticlesResponse>(
@@ -89,13 +100,11 @@ export class ArticlesService {
       categoryId = category.id;
     }
 
-    // Build where clause
     const where: Prisma.ArticleWhereInput = {
       publishedAt: { not: null },
       ...(categoryId !== undefined && { categoryId }),
     };
 
-    // Fetch with select to exclude heavy contentBlocks field
     const articles: ArticleListItem[] = await this.prisma.article.findMany({
       where,
       take: limit + 1,
@@ -119,26 +128,25 @@ export class ArticlesService {
       },
     });
 
-    // Detect hasNextPage
     const hasNextPage = articles.length > limit;
     const data = hasNextPage ? articles.slice(0, limit) : articles;
     const nextCursor = data.length > 0 ? data[data.length - 1].id : null;
 
     const result: PaginatedArticlesResponse = {
-      data: data as ArticleListItemResponse[],
+      data,
       nextCursor: hasNextPage ? nextCursor : null,
       hasNextPage,
     };
 
-    // Cache for 5 minutes
     await this.redis.set(cacheKey, JSON.stringify(result), 'EX', 300);
 
     return result;
   }
 
-  // ─── FIND ALL OWN (Paginated) ─────────────────────────────────────────────
-
-  async findAllOwn(userId: number, query: ArticleListQueryDto): Promise<PaginatedArticlesResponse> {
+  async findAllOwn(
+    userId: number,
+    query: ArticleListQueryDto,
+  ): Promise<PaginatedArticlesResponse> {
     const limit = query.limit ?? 20;
     const cursor = query.cursor;
     const categorySlug = query.category;
@@ -192,9 +200,9 @@ export class ArticlesService {
     };
   }
 
-  // ─── FIND ALL ADMIN (Paginated) ───────────────────────────────────────────
-
-  async findAllAdmin(query: ArticleListQueryDto): Promise<PaginatedArticlesResponse> {
+  async findAllAdmin(
+    query: ArticleListQueryDto,
+  ): Promise<PaginatedArticlesResponse> {
     const limit = query.limit ?? 20;
     const cursor = query.cursor;
     const categorySlug = query.category;
@@ -217,8 +225,6 @@ export class ArticlesService {
       categoryId = category.id;
     }
 
-    // Build where clause WITHOUT publishedAt filter by default.
-    // If status is provided, apply publishedAt filter accordingly.
     const statusFilter: Prisma.ArticleWhereInput =
       query.status === 'published'
         ? { publishedAt: { not: null } }
@@ -231,15 +237,14 @@ export class ArticlesService {
       ...(categoryId !== undefined && { categoryId }),
     };
 
-    // Fetch limit + 1 for hasNextPage detection
     const articles = await this.prisma.article.findMany({
       where,
       take: limit + 1,
       ...(cursor && {
         cursor: { id: cursor },
-        skip: 1, // Skip the cursor item itself
+        skip: 1,
       }),
-      orderBy: { createdAt: 'desc' }, // admin usually cares about latest created
+      orderBy: { createdAt: 'desc' },
       include: {
         category: true,
         tags: true,
@@ -249,7 +254,6 @@ export class ArticlesService {
       },
     });
 
-    // Detect hasNextPage
     const hasNextPage = articles.length > limit;
     const data = hasNextPage ? articles.slice(0, limit) : articles;
     const nextCursor = data.length > 0 ? data[data.length - 1].id : null;
@@ -261,51 +265,47 @@ export class ArticlesService {
     };
   }
 
-  // ─── FIND BY SLUG ─────────────────────────────────────────────────────────
-
-  async findBySlugAdmin(slug: string): Promise<ArticleWithPlans> {
+  async findBySlugAdmin(slug: string): Promise<ArticleDetailResponse> {
     const article = await this.prisma.article.findUnique({
       where: { slug },
-      include: {
-        plans: { include: { plan: true } },
-        category: true,
-        tags: true,
-        author: true,
-      },
+      select: articleDetailSelect,
     });
 
     if (!article) {
       throw new NotFoundException('Không tìm thấy bài viết');
     }
 
-    return article;
+    return this.mapArticleDetail(article);
   }
 
-  async findBySlug(slug: string, userPlanLevel: number, bypassPlanCheck = false): Promise<ArticleWithPlans> {
+  async findBySlug(
+    slug: string,
+    userPlanLevel: number,
+    bypassPlanCheck = false,
+  ): Promise<ArticleDetailResponse> {
     // Cache key includes userPlanLevel so each tier gets its own cached version
-    const cacheKey = `articles:slug:${slug}:level:${bypassPlanCheck ? 'admin' : userPlanLevel}`;
+    const cacheKey = `articles:v2:slug:${slug}:level:${bypassPlanCheck ? 'admin' : userPlanLevel}`;
     const cached = await this.redis.get(cacheKey);
 
     if (cached) {
-      const parsed = safeJsonParse<ArticleWithPlans>(
+      const parsed = safeJsonParse<ArticleDetailResponse>(
         cached,
         this.logger,
         cacheKey,
       );
       if (parsed) {
         this.logger.debug(`Articles findBySlug: cache hit [${cacheKey}]`);
-        return parsed;
+        const sanitized = this.sanitizeArticleDetailResponse(parsed);
+        if (this.hasUnsafeAuthorPayload(parsed)) {
+          await this.redis.set(cacheKey, JSON.stringify(sanitized), 'EX', 600);
+        }
+        return sanitized;
       }
     }
 
     const article = await this.prisma.article.findFirst({
       where: { slug, publishedAt: { not: null } },
-      include: {
-        plans: { include: { plan: true } },
-        category: true,
-        tags: true,
-        author: true,
-      },
+      select: articleDetailSelect,
     });
 
     if (!article) {
@@ -325,23 +325,18 @@ export class ArticlesService {
       }
     }
 
-    // Cache only after access check passes
-    await this.redis.set(cacheKey, JSON.stringify(article), 'EX', 600);
-    return article;
+    const response = this.mapArticleDetail(article);
+    await this.redis.set(cacheKey, JSON.stringify(response), 'EX', 600);
+    return response;
   }
 
-  // ─── CREATE ────────────────────────────────────────────────────────────────
+  async create(
+    dto: CreateArticleDto,
+    userId: number,
+    userRole?: string,
+  ): Promise<ArticleDetailResponse> {
+    void userRole;
 
-  private assertEditorCanCreateArticle(dto: CreateArticleDto, userRole?: string): void {
-    if (userRole === 'editor' && dto.publishedAt) {
-      throw new ForbiddenException('Editor chỉ được tạo bài viết ở trạng thái Draft');
-    }
-  }
-
-  async create(dto: CreateArticleDto, userId: number, userRole?: string): Promise<Article> {
-    this.assertEditorCanCreateArticle(dto, userRole);
-
-    // Check slug uniqueness
     const existing = await this.prisma.article.findUnique({
       where: { slug: dto.slug },
     });
@@ -356,7 +351,7 @@ export class ArticlesService {
         description: dto.description,
         slug: dto.slug,
         publishedAt: dto.publishedAt ? new Date(dto.publishedAt) : null,
-        contentBlocks: dto.contentBlocks as unknown as Prisma.InputJsonValue,
+        contentBlocks: this.mapContentBlocks(dto.contentBlocks),
         coverUrl: dto.coverUrl ?? null,
         readPermission: dto.readPermission ?? 'public',
         categoryId: dto.categoryId,
@@ -368,38 +363,19 @@ export class ArticlesService {
           create: dto.planIds?.map((planId) => ({ planId })) ?? [],
         },
       },
-      include: {
-        category: true,
-        tags: true,
-        author: true,
-        plans: { include: { plan: true } },
-      },
+      select: articleDetailSelect,
     });
 
     await this.invalidateCache();
-    return article;
+    return this.mapArticleDetail(article);
   }
 
-  // ─── UPDATE ────────────────────────────────────────────────────────────────
-
-  private assertEditorStatusTransition(existing: Article, dto: UpdateArticleDto, userRole?: string): void {
-    if (userRole !== 'editor' || dto.publishedAt === undefined) {
-      return;
-    }
-
-    const isCurrentlyPublished = existing.publishedAt !== null;
-    const wantsDraft = dto.publishedAt === null;
-
-    if (isCurrentlyPublished && wantsDraft) {
-      return;
-    }
-
-    throw new ForbiddenException(
-      'Editor chỉ được chuyển trạng thái bài viết từ Public về Draft',
-    );
-  }
-
-  async update(slug: string, dto: UpdateArticleDto, userRole?: string): Promise<Article> {
+  async update(
+    slug: string,
+    dto: UpdateArticleDto,
+    userRole?: string,
+  ): Promise<ArticleDetailResponse> {
+    void userRole;
     const existing = await this.prisma.article.findUnique({
       where: { slug },
     });
@@ -408,9 +384,6 @@ export class ArticlesService {
       throw new NotFoundException('Không tìm thấy bài viết');
     }
 
-    this.assertEditorStatusTransition(existing, dto, userRole);
-
-    // If slug is being changed, check uniqueness
     if (dto.slug && dto.slug !== slug) {
       const slugTaken = await this.prisma.article.findUnique({
         where: { slug: dto.slug },
@@ -431,13 +404,15 @@ export class ArticlesService {
         where: { slug },
         data: {
           ...(dto.title !== undefined && { title: dto.title }),
-          ...(dto.description !== undefined && { description: dto.description }),
+          ...(dto.description !== undefined && {
+            description: dto.description,
+          }),
           ...(dto.slug !== undefined && { slug: dto.slug }),
           ...(dto.publishedAt !== undefined && {
             publishedAt: dto.publishedAt ? new Date(dto.publishedAt) : null,
           }),
           ...(dto.contentBlocks !== undefined && {
-            contentBlocks: dto.contentBlocks as unknown as Prisma.InputJsonValue,
+            contentBlocks: this.mapContentBlocks(dto.contentBlocks),
           }),
           ...(dto.coverUrl !== undefined && { coverUrl: dto.coverUrl }),
           ...(dto.readPermission !== undefined && {
@@ -455,22 +430,15 @@ export class ArticlesService {
             },
           }),
         },
-        include: {
-          category: true,
-          tags: true,
-          author: true,
-          plans: { include: { plan: true } },
-        },
+        select: articleDetailSelect,
       });
     });
 
     await this.invalidateCache();
-    return article;
+    return this.mapArticleDetail(article);
   }
 
-  // ─── REMOVE ────────────────────────────────────────────────────────────────
-
-  async remove(slug: string, userId?: number, userRole?: string): Promise<void> {
+  async remove(slug: string, userId: number, userRole: string): Promise<void> {
     const article = await this.prisma.article.findUnique({
       where: { slug },
     });
@@ -479,13 +447,14 @@ export class ArticlesService {
       throw new NotFoundException('Không tìm thấy bài viết');
     }
 
-    if (userId !== undefined && userRole !== undefined) {
-      if (userRole !== 'admin' && article.authorId !== userId) {
-        throw new ForbiddenException('Bạn không có quyền xóa bài viết này');
-      }
+    const canDeleteArticle =
+      userRole === Role.admin ||
+      (userRole === Role.editor && article.authorId === userId);
+
+    if (!canDeleteArticle) {
+      throw new ForbiddenException('Bạn không có quyền xóa bài viết này');
     }
 
-    // Delete ArticlePlan records first, then the article
     await this.prisma.$transaction([
       this.prisma.articlePlan.deleteMany({
         where: { articleId: article.id },
@@ -498,13 +467,84 @@ export class ArticlesService {
     await this.invalidateCache();
   }
 
-  // ─── CACHE INVALIDATION ───────────────────────────────────────────────────
-
   private async invalidateCache(): Promise<void> {
-    const patterns = [
-      'articles:*',
-      'cache:*articles*',
-    ];
+    const patterns = ['articles:*', 'cache:*articles*'];
     await Promise.all(patterns.map((p) => clearCache(this.redis, p, true)));
+  }
+
+  private mapContentBlocks(
+    blocks: ArticleContentBlockDto[],
+  ): Prisma.InputJsonArray {
+    return blocks.map((block) => ({
+      ...(block.id !== undefined && { id: block.id }),
+      ...(block.type !== undefined && { type: block.type }),
+      content: block.content,
+    }));
+  }
+
+  private mapArticleDetail(
+    article: ArticleDetailRecord,
+  ): ArticleDetailResponse {
+    return {
+      id: article.id,
+      title: article.title,
+      description: article.description,
+      slug: article.slug,
+      publishedAt: article.publishedAt,
+      coverUrl: article.coverUrl,
+      category: article.category,
+      tags: article.tags,
+      author: article.author
+        ? {
+            id: article.author.id,
+            username: article.author.username,
+          }
+        : null,
+      createdAt: article.createdAt,
+      updatedAt: article.updatedAt,
+      contentBlocks: article.contentBlocks,
+      plans: article.plans.map(({ planId, plan }) => ({
+        planId,
+        plan: {
+          slug: plan.slug,
+          level: plan.level,
+        },
+      })),
+    };
+  }
+
+  private sanitizeArticleDetailResponse(
+    article: ArticleDetailResponse,
+  ): ArticleDetailResponse {
+    return {
+      ...article,
+      author: article.author
+        ? {
+            id: article.author.id,
+            username: article.author.username,
+          }
+        : null,
+      plans: Array.isArray(article.plans)
+        ? article.plans.map(({ planId, plan }) => ({
+            planId,
+            plan: {
+              slug: plan.slug,
+              level: plan.level,
+            },
+          }))
+        : [],
+    };
+  }
+
+  private hasUnsafeAuthorPayload(article: ArticleDetailResponse): boolean {
+    const author = article.author;
+    return (
+      author !== null &&
+      typeof author === 'object' &&
+      ('passwordHash' in author ||
+        'email' in author ||
+        'role' in author ||
+        'provider' in author)
+    );
   }
 }

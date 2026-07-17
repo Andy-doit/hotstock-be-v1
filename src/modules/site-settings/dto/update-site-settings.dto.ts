@@ -4,7 +4,8 @@ import { IsObject, IsString, MaxLength } from 'class-validator';
 export class UpdateSiteSettingsDto {
   @ApiProperty({
     example: {
-      marketCryptoUrl: 'https://www.tradingview-widget.com/embed-widget/market-quotes/',
+      marketCryptoUrl:
+        'https://www.tradingview-widget.com/embed-widget/market-quotes/',
     },
   })
   @IsObject()

@@ -10,7 +10,6 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { UserResponseDto, PaginatedUsersDto } from './dto/user-response.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 
-/** User shape with plan included — used by mapToResponse. */
 type UserWithPlan = Prisma.UserGetPayload<{ include: { plan: true } }>;
 
 @Injectable()
@@ -18,8 +17,6 @@ export class UsersService {
   private readonly logger = new Logger(UsersService.name);
 
   constructor(private readonly prisma: PrismaService) {}
-
-  // ─── ADMIN: FIND ALL ────────────────────────────────────────────────────────
 
   async findAll(query: {
     page: number;
@@ -46,7 +43,12 @@ export class UsersService {
     };
 
     // Build orderBy — only allow safe columns
-    const allowedSortFields = ['createdAt', 'email', 'username', 'role'] as const;
+    const allowedSortFields = [
+      'createdAt',
+      'email',
+      'username',
+      'role',
+    ] as const;
     type SortField = (typeof allowedSortFields)[number];
     const sortField: SortField = allowedSortFields.includes(sort as SortField)
       ? (sort as SortField)
@@ -67,15 +69,13 @@ export class UsersService {
     const totalPages = Math.ceil(total / limit);
 
     return {
-      data: users.map(this.mapToResponse),
+      data: users.map((user) => this.mapToResponse(user)),
       total,
       page,
       limit,
       totalPages,
     };
   }
-
-  // ─── ADMIN: FIND ONE ────────────────────────────────────────────────────────
 
   async findOne(id: number): Promise<UserResponseDto> {
     const user = await this.prisma.user.findUnique({
@@ -89,8 +89,6 @@ export class UsersService {
 
     return this.mapToResponse(user);
   }
-
-  // ─── ADMIN: UPDATE ROLE ────────────────────────────────────────────────────
 
   async updateRole(
     adminId: number,
@@ -118,8 +116,6 @@ export class UsersService {
     return this.mapToResponse(updatedUser);
   }
 
-  // ─── ADMIN: BLOCK USER ──────────────────────────────────────────────────────
-
   async blockUser(adminId: number, targetId: number): Promise<void> {
     if (adminId === targetId) {
       throw new BadRequestException('Không thể tự khóa tài khoản của mình');
@@ -145,8 +141,6 @@ export class UsersService {
     ]);
   }
 
-  // ─── ADMIN: UNBLOCK USER ────────────────────────────────────────────────────
-
   async unblockUser(targetId: number): Promise<void> {
     const user = await this.prisma.user.findUnique({
       where: { id: targetId },
@@ -162,12 +156,7 @@ export class UsersService {
     });
   }
 
-  // ─── ADMIN: ASSIGN PLAN ─────────────────────────────────────────────────────
-
-  async assignPlan(
-    targetId: number,
-    planId: number,
-  ): Promise<UserResponseDto> {
+  async assignPlan(targetId: number, planId: number): Promise<UserResponseDto> {
     const user = await this.prisma.user.findUnique({
       where: { id: targetId },
     });
@@ -198,8 +187,6 @@ export class UsersService {
     return this.mapToResponse(updatedUser);
   }
 
-  // ─── ADMIN: DELETE USER ──────────────────────────────────────────────────────
-
   async deleteUser(targetId: number): Promise<void> {
     const user = await this.prisma.user.findUnique({
       where: { id: targetId },
@@ -227,8 +214,6 @@ export class UsersService {
     ]);
   }
 
-  // ─── ADMIN: UPDATE USER ─────────────────────────────────────────────────────
-
   async adminUpdateUser(
     targetId: number,
     dto: import('./dto/admin-update-user.dto').AdminUpdateUserDto,
@@ -241,8 +226,6 @@ export class UsersService {
     if (!user) {
       throw new NotFoundException('Không tìm thấy người dùng');
     }
-
-    // Check email uniqueness if changing email
     if (dto.email && dto.email !== user.email) {
       const existing = await this.prisma.user.findUnique({
         where: { email: dto.email },
@@ -251,8 +234,6 @@ export class UsersService {
         throw new ConflictException('Email đã được sử dụng');
       }
     }
-
-    // Check username uniqueness if changing username
     if (dto.username && dto.username !== user.username) {
       const existing = await this.prisma.user.findFirst({
         where: { username: dto.username },
@@ -273,7 +254,9 @@ export class UsersService {
         data: {
           ...(dto.username !== undefined && { username: dto.username }),
           ...(dto.fullName !== undefined && { fullName: dto.fullName }),
-          ...(dto.phoneNumber !== undefined && { phoneNumber: dto.phoneNumber }),
+          ...(dto.phoneNumber !== undefined && {
+            phoneNumber: dto.phoneNumber,
+          }),
           ...(dto.email !== undefined && { email: dto.email }),
           ...(dto.role !== undefined && { role: dto.role }),
           ...(dto.blocked !== undefined && { blocked: dto.blocked }),
@@ -294,8 +277,6 @@ export class UsersService {
     return this.mapToResponse(updatedUser);
   }
 
-  // ─── USER: GET PROFILE ──────────────────────────────────────────────────────
-
   async getProfile(userId: number): Promise<UserResponseDto> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -308,8 +289,6 @@ export class UsersService {
 
     return this.mapToResponse(user);
   }
-
-  // ─── USER: UPDATE PROFILE ───────────────────────────────────────────────────
 
   async updateProfile(
     userId: number,
@@ -335,13 +314,6 @@ export class UsersService {
 
     return this.mapToResponse(updatedUser);
   }
-
-  // ─── HELPERS ────────────────────────────────────────────────────────────────
-
-  /**
-   * Helper to strip sensitive data (passwordHash) from user object
-   * and shape the plan correctly.
-   */
   private mapToResponse(user: UserWithPlan): UserResponseDto {
     return {
       id: user.id,
@@ -357,7 +329,6 @@ export class UsersService {
       termsAcceptedAt: user.termsAcceptedAt,
       personalDataConsent: user.personalDataConsent,
       personalDataConsentAt: user.personalDataConsentAt,
-      passwordChangedAt: user.passwordChangedAt,
       plan: user.plan
         ? {
             id: user.plan.id,

@@ -2,7 +2,7 @@ import { JwtPayload } from '../../modules/auth/interfaces/jwt-payload.interface'
 
 /**
  * Augment Fastify types to include the `user` property set by JwtAuthGuard
- * and OptionalJwtAuthGuard via request decorators. Eliminates `as any` casts
+ * and OptionalJwtAuthGuard via request decorators. Eliminates unsafe request casts
  * in controllers and interceptors.
  */
 declare module 'fastify' {

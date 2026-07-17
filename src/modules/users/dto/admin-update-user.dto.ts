@@ -10,11 +10,6 @@ import {
 } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Role } from '@prisma/client';
-
-/**
- * DTO for admin updating a user's profile.
- * Allows updating fields that regular users cannot change themselves.
- */
 export class AdminUpdateUserDto {
   @ApiPropertyOptional({ example: 'johndoe123', description: 'Tên người dùng' })
   @IsString()
@@ -49,12 +44,18 @@ export class AdminUpdateUserDto {
   @IsOptional()
   role?: Role;
 
-  @ApiPropertyOptional({ example: false, description: 'Trạng thái khóa tài khoản' })
+  @ApiPropertyOptional({
+    example: false,
+    description: 'Trạng thái khóa tài khoản',
+  })
   @IsBoolean({ message: 'blocked phải là boolean' })
   @IsOptional()
   blocked?: boolean;
 
-  @ApiPropertyOptional({ example: true, description: 'Trạng thái xác nhận email' })
+  @ApiPropertyOptional({
+    example: true,
+    description: 'Trạng thái xác nhận email',
+  })
   @IsBoolean({ message: 'confirmed phải là boolean' })
   @IsOptional()
   confirmed?: boolean;

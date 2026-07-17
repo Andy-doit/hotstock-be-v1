@@ -10,6 +10,15 @@ import {
 } from '@nestjs/terminus';
 import { PrismaService } from '../../prisma/prisma.service';
 import Redis from 'ioredis';
+import { getSafeErrorLogMessage } from '../../common/utils/log-redaction';
+
+const UNKNOWN_HEALTH_ERROR = 'Unknown health check error';
+
+function getHealthErrorMessage(error: unknown): string {
+  return error instanceof Error
+    ? getSafeErrorLogMessage(error)
+    : UNKNOWN_HEALTH_ERROR;
+}
 
 class PrismaHealthIndicator extends HealthIndicator {
   constructor(private readonly prisma: PrismaService) {
@@ -20,10 +29,10 @@ class PrismaHealthIndicator extends HealthIndicator {
     try {
       await this.prisma.$queryRaw`SELECT 1`;
       return this.getStatus(key, true);
-    } catch (error: any) {
+    } catch (error: unknown) {
       throw new HealthCheckError(
         'Prisma check failed',
-        this.getStatus(key, false, { message: error.message }),
+        this.getStatus(key, false, { message: getHealthErrorMessage(error) }),
       );
     }
   }
@@ -38,10 +47,10 @@ class RedisHealthIndicator extends HealthIndicator {
     try {
       await this.redis.ping();
       return this.getStatus(key, true);
-    } catch (error: any) {
+    } catch (error: unknown) {
       throw new HealthCheckError(
         'Redis check failed',
-        this.getStatus(key, false, { message: error.message }),
+        this.getStatus(key, false, { message: getHealthErrorMessage(error) }),
       );
     }
   }

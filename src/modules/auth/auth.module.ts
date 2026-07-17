@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { BullModule } from '@nestjs/bullmq';
+import type { SignOptions } from 'jsonwebtoken';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
@@ -13,17 +14,18 @@ import { JwtStrategy } from './strategies/jwt.strategy';
 
     JwtModule.registerAsync({
       inject: [ConfigService],
-      useFactory: (configService: ConfigService) => ({
-        secret: configService.get<string>('jwt.accessSecret'),
-        signOptions: {
-          // Library accepts string like "15m" or number (seconds).
-          // Cast through unknown to satisfy @types/jsonwebtoken strict signature.
-          expiresIn: configService.get<string | number>(
-            'jwt.accessExpiresIn',
-            '15m',
-          ) as unknown as number,
-        },
-      }),
+      useFactory: (configService: ConfigService) => {
+        const defaultAccessExpiresIn: SignOptions['expiresIn'] = '15m';
+        return {
+          secret: configService.get<string>('jwt.accessSecret'),
+          signOptions: {
+            expiresIn: configService.get<SignOptions['expiresIn']>(
+              'jwt.accessExpiresIn',
+              defaultAccessExpiresIn,
+            ),
+          },
+        };
+      },
     }),
 
     BullModule.registerQueue({

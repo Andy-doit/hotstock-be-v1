@@ -33,7 +33,10 @@ export class RegisterDto {
   @Matches(/^(0|\+84)[3-9][0-9]{8}$/, { message: 'Số điện thoại không hợp lệ' })
   phoneNumber?: string;
 
-  @ApiProperty({ example: 'password123', description: 'Mật khẩu tối thiểu 8 ký tự' })
+  @ApiProperty({
+    example: 'password123',
+    description: 'Mật khẩu tối thiểu 8 ký tự',
+  })
   @IsString()
   @MinLength(8, { message: 'Mật khẩu phải có ít nhất 8 ký tự' })
   password: string;
@@ -45,8 +48,12 @@ export class RegisterDto {
 
   @ApiProperty({
     example: true,
-    description: 'Người dùng đồng ý điều khoản sử dụng và cho phép xử lý thông tin cá nhân',
+    description:
+      'Người dùng đồng ý điều khoản sử dụng và cho phép xử lý thông tin cá nhân',
   })
-  @Equals(true, { message: 'Bạn cần đồng ý với điều khoản sử dụng và cho phép xử lý thông tin cá nhân' })
+  @Equals(true, {
+    message:
+      'Bạn cần đồng ý với điều khoản sử dụng và cho phép xử lý thông tin cá nhân',
+  })
   termsAccepted: boolean;
 }

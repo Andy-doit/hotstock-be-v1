@@ -39,6 +39,15 @@ model User {
   articles          Article[]
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
+
+  @@index([username])
+  @@index([planId])
+  @@index([createdAt(sort: Desc)])
+  @@index([role, createdAt(sort: Desc)])
+  @@index([blocked, createdAt(sort: Desc)])
+  @@index([email(ops: raw("gin_trgm_ops"))], type: Gin, map: "User_email_trgm_idx")
+  @@index([username(ops: raw("gin_trgm_ops"))], type: Gin, map: "User_username_trgm_idx")
+  @@index([fullName(ops: raw("gin_trgm_ops"))], type: Gin, map: "User_fullName_trgm_idx")
 }
 
 model RefreshToken {
@@ -82,6 +91,8 @@ model Plan {
   fieldVisibilities     PlanFieldVisibility?
   createdAt             DateTime                 @default(now())
   updatedAt             DateTime                 @updatedAt
+
+  @@index([isActive, sortOrder])
 }
 
 model PlanFieldVisibility {
@@ -151,6 +162,9 @@ model Article {
 
   @@index([publishedAt(sort: Desc)])
   @@index([categoryId, publishedAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@index([authorId, createdAt(sort: Desc)])
+  @@index([categoryId, createdAt(sort: Desc)])
 }
 
 model ArticlePlan {

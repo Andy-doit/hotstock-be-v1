@@ -22,7 +22,6 @@ export class UserResponseDto {
   @ApiPropertyOptional() termsAcceptedAt: Date | null;
   @ApiProperty() personalDataConsent: boolean;
   @ApiPropertyOptional() personalDataConsentAt: Date | null;
-  @ApiPropertyOptional() passwordChangedAt: Date | null;
   @ApiPropertyOptional({ type: UserPlanDto }) plan: UserPlanDto | null;
   @ApiProperty() createdAt: Date;
   @ApiProperty() updatedAt: Date;

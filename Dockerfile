@@ -11,8 +11,8 @@ COPY package*.json ./
 RUN npm ci
 COPY . .
 RUN npx prisma generate
-RUN npm run build
-# Compile seed script for production
+RUN rm -f tsconfig.build.tsbuildinfo && npm run build
+# Compile the seed script used by prisma.config.ts when NODE_ENV=production
 RUN npx tsc prisma/seed.ts --outDir dist/prisma --target es2021 --module commonjs --moduleResolution node
 
 # Stage 3: runner
@@ -23,20 +23,18 @@ ENV NODE_ENV=production
 COPY package.json ./
 COPY --from=builder /app/dist ./dist
 COPY --from=deps /app/node_modules ./node_modules
+COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 # Copy prisma CLI files for migrations
 COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
 COPY --from=builder /app/node_modules/.bin/prisma ./node_modules/.bin/prisma
 
-# Create public uploads directory and assign ownership to node user
-RUN mkdir -p /app/public/uploads && chown -R node:node /app/public
-
 # Use the built-in node user
 USER node
-EXPOSE 3001
+EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3001/api/v1/health || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/api/v1/health || exit 1
 
 CMD ["sh", "-c", "npx prisma migrate deploy && node dist/src/main"]

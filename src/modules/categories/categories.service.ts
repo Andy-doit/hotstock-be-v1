@@ -6,13 +6,22 @@ import {
   Inject,
   Logger,
 } from '@nestjs/common';
-import { Category } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import Redis from 'ioredis';
 import { PrismaService } from '../../prisma/prisma.service';
 import { clearCache } from '../../common/interceptors/cache.interceptor';
 import { safeJsonParse } from '../../common/utils/safe-json-parse';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
+import { CategoryResponseDto } from './dto/category-response.dto';
+
+type CategoryRecord = Prisma.CategoryGetPayload<Prisma.CategoryDefaultArgs>;
+type CategoryWithCount = Prisma.CategoryGetPayload<{
+  include: { _count: { select: { articles: true } } };
+}>;
+type CategoryMapperInput = CategoryRecord | CategoryWithCount;
+
+const CATEGORY_LIST_LIMIT = 500;
 
 @Injectable()
 export class CategoriesService {
@@ -22,17 +31,16 @@ export class CategoriesService {
     private readonly prisma: PrismaService,
     @Inject('REDIS_CLIENT') private readonly redis: Redis,
   ) {}
-
-  /**
-   * Return all categories ordered by name asc.
-   * Cached in Redis for 1 hour.
-   */
-  async findAll(): Promise<Category[]> {
-    const cacheKey = 'categories:all';
+  async findAll(): Promise<CategoryResponseDto[]> {
+    const cacheKey = 'categories:all:v3';
 
     const cached = await this.redis.get(cacheKey);
     if (cached) {
-      const parsed = safeJsonParse<Category[]>(cached, this.logger, cacheKey);
+      const parsed = safeJsonParse<CategoryResponseDto[]>(
+        cached,
+        this.logger,
+        cacheKey,
+      );
       if (parsed) {
         this.logger.debug('Categories findAll: cache hit');
         return parsed;
@@ -43,22 +51,22 @@ export class CategoriesService {
       orderBy: { name: 'asc' },
       include: {
         _count: {
-          select: { articles: true }
-        }
-      }
+          select: { articles: true },
+        },
+      },
+      take: CATEGORY_LIST_LIMIT,
     });
 
-    await this.redis.set(cacheKey, JSON.stringify(categories), 'EX', 3600);
-    this.logger.debug(`Categories findAll: cached ${categories.length} categories`);
+    const response = categories.map((category) => this.mapCategory(category));
 
-    return categories;
+    await this.redis.set(cacheKey, JSON.stringify(response), 'EX', 3600);
+    this.logger.debug(
+      `Categories findAll: cached ${categories.length} categories`,
+    );
+
+    return response;
   }
-
-  /**
-   * Find a single category by slug.
-   * @throws NotFoundException if not found.
-   */
-  async findBySlug(slug: string): Promise<Category> {
+  async findBySlug(slug: string): Promise<CategoryResponseDto> {
     const category = await this.prisma.category.findUnique({
       where: { slug },
     });
@@ -67,18 +75,10 @@ export class CategoriesService {
       throw new NotFoundException('Không tìm thấy danh mục');
     }
 
-    return category;
+    return this.mapCategory(category);
   }
-
-  /**
-   * Create a new category.
-   * If slug not provided, auto-generates from name.
-   * @throws ConflictException if slug already taken.
-   */
-  async create(dto: CreateCategoryDto): Promise<Category> {
+  async create(dto: CreateCategoryDto): Promise<CategoryResponseDto> {
     const slug = dto.slug || this.generateSlug(dto.name);
-
-    // Check slug uniqueness
     const existing = await this.prisma.category.findUnique({
       where: { slug },
     });
@@ -91,20 +91,19 @@ export class CategoriesService {
       data: {
         name: dto.name,
         slug,
-        ...(dto.isVisibleOnUI !== undefined && { isVisibleOnUI: dto.isVisibleOnUI }),
+        ...(dto.isVisibleOnUI !== undefined && {
+          isVisibleOnUI: dto.isVisibleOnUI,
+        }),
       },
     });
 
     await this.invalidateCache();
-    return category;
+    return this.mapCategory(category);
   }
-
-  /**
-   * Update a category by slug.
-   * @throws NotFoundException if not found.
-   * @throws ConflictException if new slug already taken.
-   */
-  async update(slug: string, dto: UpdateCategoryDto): Promise<Category> {
+  async update(
+    slug: string,
+    dto: UpdateCategoryDto,
+  ): Promise<CategoryResponseDto> {
     const existing = await this.prisma.category.findUnique({
       where: { slug },
     });
@@ -112,8 +111,6 @@ export class CategoriesService {
     if (!existing) {
       throw new NotFoundException('Không tìm thấy danh mục');
     }
-
-    // If changing slug, check uniqueness of the new slug
     if (dto.slug && dto.slug !== slug) {
       const slugTaken = await this.prisma.category.findUnique({
         where: { slug: dto.slug },
@@ -129,19 +126,15 @@ export class CategoriesService {
       data: {
         name: dto.name,
         slug: dto.slug,
-        ...(dto.isVisibleOnUI !== undefined && { isVisibleOnUI: dto.isVisibleOnUI }),
+        ...(dto.isVisibleOnUI !== undefined && {
+          isVisibleOnUI: dto.isVisibleOnUI,
+        }),
       },
     });
 
     await this.invalidateCache();
-    return category;
+    return this.mapCategory(category);
   }
-
-  /**
-   * Remove a category by slug.
-   * @throws NotFoundException if not found.
-   * @throws BadRequestException if category has articles.
-   */
   async remove(slug: string): Promise<void> {
     const category = await this.prisma.category.findUnique({
       where: { slug },
@@ -150,16 +143,12 @@ export class CategoriesService {
     if (!category) {
       throw new NotFoundException('Không tìm thấy danh mục');
     }
-
-    // Check if any articles belong to this category
     const articleCount = await this.prisma.article.count({
       where: { categoryId: category.id },
     });
 
     if (articleCount > 0) {
-      throw new BadRequestException(
-        'Không thể xóa danh mục đang có bài viết',
-      );
+      throw new BadRequestException('Không thể xóa danh mục đang có bài viết');
     }
 
     await this.prisma.category.delete({
@@ -168,41 +157,37 @@ export class CategoriesService {
 
     await this.invalidateCache();
   }
-
-  /**
-   * Auto-generate a URL-safe slug from a name.
-   * - Lowercase
-   * - Trim whitespace
-   * - Replace Vietnamese diacritics with ASCII equivalents
-   * - Replace spaces and special chars with hyphens
-   * - Remove consecutive hyphens
-   * - Remove leading/trailing hyphens
-   */
   private generateSlug(name: string): string {
     return name
       .toLowerCase()
       .trim()
-      // Normalize Vietnamese characters
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
-      // Replace đ/Đ
       .replace(/đ/g, 'd')
       .replace(/Đ/g, 'd')
-      // Replace non-alphanumeric chars with hyphens
       .replace(/[^a-z0-9\s-]/g, '')
-      // Replace whitespace with hyphens
       .replace(/\s+/g, '-')
-      // Remove consecutive hyphens
       .replace(/-+/g, '-')
-      // Remove leading/trailing hyphens
       .replace(/^-|-$/g, '');
   }
-
-  /**
-   * Invalidate both service-level and interceptor-level cache for categories.
-   */
   private async invalidateCache(): Promise<void> {
     await this.redis.del('categories:all');
+    await this.redis.del('categories:all:v2');
+    await this.redis.del('categories:all:v3');
     await clearCache(this.redis, 'cache:*categories*');
+  }
+
+  private mapCategory(category: CategoryMapperInput): CategoryResponseDto {
+    return {
+      id: category.id,
+      name: category.name,
+      slug: category.slug,
+      isVisibleOnUI: category.isVisibleOnUI,
+      ...('_count' in category
+        ? { _count: { articles: category._count.articles } }
+        : {}),
+      createdAt: category.createdAt,
+      updatedAt: category.updatedAt,
+    };
   }
 }

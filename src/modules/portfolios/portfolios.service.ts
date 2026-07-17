@@ -1,38 +1,45 @@
 import {
-  Injectable,
-  NotFoundException,
   ForbiddenException,
   Inject,
+  Injectable,
   Logger,
+  NotFoundException,
 } from '@nestjs/common';
-import { Portfolio, Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import Redis from 'ioredis';
-import { PrismaService } from '../../prisma/prisma.service';
 import { clearCache } from '../../common/interceptors/cache.interceptor';
+import { safeJsonParse } from '../../common/utils/safe-json-parse';
+import { PrismaService } from '../../prisma/prisma.service';
 import { CreatePortfolioDto } from './dto/create-portfolio.dto';
+import {
+  PortfolioInformationResponseDto,
+  PortfolioReasonResponseDto,
+  PortfolioResponseDto,
+  PortfolioSignalResponseDto,
+  PortfolioStockResponseDto,
+} from './dto/portfolio-response.dto';
 import { UpdatePortfolioDto } from './dto/update-portfolio.dto';
 
-import { safeJsonParse } from '../../common/utils/safe-json-parse';
+const portfolioInclude = {
+  stocks: true,
+  information: true,
+  reasons: true,
+  signals: true,
+  plan: {
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+      level: true,
+    },
+  },
+} satisfies Prisma.PortfolioInclude;
 
 type PortfolioWithRelations = Prisma.PortfolioGetPayload<{
-  include: {
-    stocks: true;
-    information: true;
-    reasons: true;
-    signals: true;
-    plan: true;
-  };
+  include: typeof portfolioInclude;
 }>;
 
-type PortfolioResponse = Omit<
-  PortfolioWithRelations,
-  'stocks' | 'information' | 'reasons' | 'signals'
-> & {
-  stocks?: PortfolioWithRelations['stocks'];
-  information?: PortfolioWithRelations['information'];
-  reasons?: PortfolioWithRelations['reasons'];
-  signals?: PortfolioWithRelations['signals'];
-};
+const ADMIN_PORTFOLIO_LIST_LIMIT = 100;
 
 @Injectable()
 export class PortfoliosService {
@@ -43,47 +50,38 @@ export class PortfoliosService {
     @Inject('REDIS_CLIENT') private readonly redis: Redis,
   ) {}
 
-  // ─── FIND ALL (ADMIN) ─────────────────────────────────────────────────────
-
-  async findAll(): Promise<PortfolioResponse[]> {
+  async findAll(): Promise<PortfolioResponseDto[]> {
     const portfolios = await this.prisma.portfolio.findMany({
       orderBy: { publishedAt: 'desc' },
-      include: {
-        stocks: true,
-        information: true,
-        reasons: true,
-        signals: true,
-        plan: true,
-      },
+      include: portfolioInclude,
+      take: ADMIN_PORTFOLIO_LIST_LIMIT,
     });
-    return portfolios.map((portfolio) => this.stripEmptyBlocks(portfolio));
-  }
 
-  // ─── FIND LATEST BY PLAN ──────────────────────────────────────────────────
-  // FIX: Plan check BEFORE cache. Cache key includes planLevel.
+    return portfolios.map((portfolio) => this.mapPortfolio(portfolio));
+  }
 
   async findLatestByPlan(
     planSlug: string,
     userPlanLevel: number,
     bypassPlanCheck = false,
-  ): Promise<PortfolioResponse> {
-    const cacheKey = `portfolio:${planSlug}:level:${bypassPlanCheck ? 'admin' : userPlanLevel}`;
+  ): Promise<PortfolioResponseDto> {
+    const cacheKey = `portfolio:${planSlug}:level:${bypassPlanCheck ? 'admin' : userPlanLevel}:v2`;
 
-    // Check cache FIRST — avoid DB lookup on hit
     const cached = await this.redis.get(cacheKey);
     if (cached) {
-      const parsed = safeJsonParse<PortfolioWithRelations>(
+      const parsed = safeJsonParse<PortfolioResponseDto>(
         cached,
         this.logger,
         cacheKey,
       );
       if (parsed) {
-        this.logger.debug(`Portfolio findLatestByPlan: cache hit [${cacheKey}]`);
-        return this.stripEmptyBlocks(parsed);
+        this.logger.debug(
+          `Portfolio findLatestByPlan: cache hit [${cacheKey}]`,
+        );
+        return parsed;
       }
     }
 
-    // Find plan (only on cache miss)
     const plan = await this.prisma.plan.findUnique({
       where: { slug: planSlug },
       select: { id: true, level: true },
@@ -93,8 +91,6 @@ export class PortfoliosService {
       throw new NotFoundException('Không tìm thấy gói');
     }
 
-    // Plan access check — BEFORE caching to prevent premium content leak
-    // Admins/editors bypass the plan restriction
     if (!bypassPlanCheck && plan.level > userPlanLevel) {
       throw new ForbiddenException(
         'Bạn cần nâng cấp gói để truy cập nội dung này',
@@ -104,32 +100,20 @@ export class PortfoliosService {
     const portfolio = await this.prisma.portfolio.findFirst({
       where: { planId: plan.id },
       orderBy: { publishedAt: 'desc' },
-      include: {
-        stocks: true,
-        information: true,
-        reasons: true,
-        signals: true,
-        plan: true,
-      },
+      include: portfolioInclude,
     });
 
     if (!portfolio) {
       throw new NotFoundException('Chưa có danh mục đầu tư cho gói này');
     }
 
-    // Cache only after access check passes.
-    // IMPORTANT: cache the raw (unstripped) portfolio — stripEmptyBlocks is applied
-    // fresh on every read (cache hit or miss). Caching the stripped shape means empty
-    // relations are omitted from the JSON entirely, so a later cache-hit re-stripping
-    // that object would destructure `undefined` and throw.
-    await this.redis.set(cacheKey, JSON.stringify(portfolio), 'EX', 3600);
-    return this.stripEmptyBlocks(portfolio);
+    const response = this.mapPortfolio(portfolio);
+
+    await this.redis.set(cacheKey, JSON.stringify(response), 'EX', 3600);
+    return response;
   }
 
-  // ─── CREATE ────────────────────────────────────────────────────────────────
-
-  async create(dto: CreatePortfolioDto): Promise<PortfolioResponse> {
-    // Verify plan exists
+  async create(dto: CreatePortfolioDto): Promise<PortfolioResponseDto> {
     const plan = await this.prisma.plan.findUnique({
       where: { id: dto.planId },
     });
@@ -142,68 +126,68 @@ export class PortfoliosService {
       data: {
         planId: dto.planId,
         publishedAt: new Date(dto.publishedAt),
-        ...(dto.stocks.length > 0 && { stocks: {
-          createMany: {
-            data: dto.stocks.map((s) => ({
-              symbol: s.symbol,
-              sector: s.sector ?? null,
-              purchaseDate: new Date(s.purchaseDate),
-              costBasis: s.costBasis,
-              marketPrice: s.marketPrice,
-              quantity: s.quantity,
-              note: s.note ?? null,
-            })),
+        ...(dto.stocks.length > 0 && {
+          stocks: {
+            createMany: {
+              data: dto.stocks.map((stock) => ({
+                symbol: stock.symbol,
+                sector: stock.sector ?? null,
+                purchaseDate: new Date(stock.purchaseDate),
+                costBasis: stock.costBasis,
+                marketPrice: stock.marketPrice,
+                quantity: stock.quantity,
+                note: stock.note ?? null,
+              })),
+            },
           },
-        } }),
-        ...(dto.information.length > 0 && { information: {
-          createMany: {
-            data: dto.information.map((i) => ({
-              month: i.month,
-              vnindexReturn: i.vnindexReturn,
-              recommendReturn: i.recommendReturn,
-            })),
+        }),
+        ...(dto.information.length > 0 && {
+          information: {
+            createMany: {
+              data: dto.information.map((information) => ({
+                month: information.month,
+                vnindexReturn: information.vnindexReturn,
+                recommendReturn: information.recommendReturn,
+              })),
+            },
           },
-        } }),
-        ...(dto.reasons.length > 0 && { reasons: {
-          createMany: {
-            data: dto.reasons.map((r) => ({
-              type: r.type,
-              symbol: r.symbol,
-              content: r.content,
-            })),
+        }),
+        ...(dto.reasons.length > 0 && {
+          reasons: {
+            createMany: {
+              data: dto.reasons.map((reason) => ({
+                type: reason.type,
+                symbol: reason.symbol,
+                content: reason.content,
+              })),
+            },
           },
-        } }),
-        ...(dto.signals.length > 0 && { signals: {
-          createMany: {
-            data: dto.signals.map((s) => ({
-              symbol: s.symbol,
-              signalType: s.signalType,
-              description: s.description,
-              targetPrice: s.targetPrice ?? null,
-              stopLoss: s.stopLoss ?? null,
-            })),
+        }),
+        ...(dto.signals.length > 0 && {
+          signals: {
+            createMany: {
+              data: dto.signals.map((signal) => ({
+                symbol: signal.symbol,
+                signalType: signal.signalType,
+                description: signal.description,
+                targetPrice: signal.targetPrice ?? null,
+                stopLoss: signal.stopLoss ?? null,
+              })),
+            },
           },
-        } }),
+        }),
       },
-      include: {
-        stocks: true,
-        information: true,
-        reasons: true,
-        signals: true,
-        plan: true,
-      },
+      include: portfolioInclude,
     });
 
     await this.invalidateCache();
-    return this.stripEmptyBlocks(portfolio);
+    return this.mapPortfolio(portfolio);
   }
-
-  // ─── UPDATE ────────────────────────────────────────────────────────────────
 
   async update(
     id: number,
     dto: UpdatePortfolioDto,
-  ): Promise<PortfolioResponse> {
+  ): Promise<PortfolioResponseDto> {
     const existing = await this.prisma.portfolio.findUnique({
       where: { id },
     });
@@ -212,9 +196,7 @@ export class PortfoliosService {
       throw new NotFoundException('Không tìm thấy danh mục đầu tư');
     }
 
-    // Transaction: delete old nested data, update portfolio, create new nested data
     const portfolio = await this.prisma.$transaction(async (tx) => {
-      // Delete existing nested data if new data is provided
       if (dto.stocks) {
         await tx.portfolioStock.deleteMany({ where: { portfolioId: id } });
       }
@@ -230,7 +212,6 @@ export class PortfoliosService {
         await tx.portfolioSignal.deleteMany({ where: { portfolioId: id } });
       }
 
-      // Update portfolio and create new nested data
       return tx.portfolio.update({
         where: { id },
         data: {
@@ -238,72 +219,68 @@ export class PortfoliosService {
           ...(dto.publishedAt !== undefined && {
             publishedAt: new Date(dto.publishedAt),
           }),
-          ...(dto.stocks && dto.stocks.length > 0 && {
-            stocks: {
-              createMany: {
-                data: dto.stocks.map((s) => ({
-                  symbol: s.symbol,
-                  sector: s.sector ?? null,
-                  purchaseDate: new Date(s.purchaseDate),
-                  costBasis: s.costBasis,
-                  marketPrice: s.marketPrice,
-                  quantity: s.quantity,
-                  note: s.note ?? null,
-                })),
+          ...(dto.stocks &&
+            dto.stocks.length > 0 && {
+              stocks: {
+                createMany: {
+                  data: dto.stocks.map((stock) => ({
+                    symbol: stock.symbol,
+                    sector: stock.sector ?? null,
+                    purchaseDate: new Date(stock.purchaseDate),
+                    costBasis: stock.costBasis,
+                    marketPrice: stock.marketPrice,
+                    quantity: stock.quantity,
+                    note: stock.note ?? null,
+                  })),
+                },
               },
-            },
-          }),
-          ...(dto.information && dto.information.length > 0 && {
-            information: {
-              createMany: {
-                data: dto.information.map((i) => ({
-                  month: i.month,
-                  vnindexReturn: i.vnindexReturn,
-                  recommendReturn: i.recommendReturn,
-                })),
+            }),
+          ...(dto.information &&
+            dto.information.length > 0 && {
+              information: {
+                createMany: {
+                  data: dto.information.map((information) => ({
+                    month: information.month,
+                    vnindexReturn: information.vnindexReturn,
+                    recommendReturn: information.recommendReturn,
+                  })),
+                },
               },
-            },
-          }),
-          ...(dto.reasons && dto.reasons.length > 0 && {
-            reasons: {
-              createMany: {
-                data: dto.reasons.map((r) => ({
-                  type: r.type,
-                  symbol: r.symbol,
-                  content: r.content,
-                })),
+            }),
+          ...(dto.reasons &&
+            dto.reasons.length > 0 && {
+              reasons: {
+                createMany: {
+                  data: dto.reasons.map((reason) => ({
+                    type: reason.type,
+                    symbol: reason.symbol,
+                    content: reason.content,
+                  })),
+                },
               },
-            },
-          }),
-          ...(dto.signals && dto.signals.length > 0 && {
-            signals: {
-              createMany: {
-                data: dto.signals.map((s) => ({
-                  symbol: s.symbol,
-                  signalType: s.signalType,
-                  description: s.description,
-                  targetPrice: s.targetPrice ?? null,
-                  stopLoss: s.stopLoss ?? null,
-                })),
+            }),
+          ...(dto.signals &&
+            dto.signals.length > 0 && {
+              signals: {
+                createMany: {
+                  data: dto.signals.map((signal) => ({
+                    symbol: signal.symbol,
+                    signalType: signal.signalType,
+                    description: signal.description,
+                    targetPrice: signal.targetPrice ?? null,
+                    stopLoss: signal.stopLoss ?? null,
+                  })),
+                },
               },
-            },
-          }),
+            }),
         },
-        include: {
-          stocks: true,
-          information: true,
-          reasons: true,
-          signals: true,
-          plan: true,
-        },
+        include: portfolioInclude,
       });
     });
 
     await this.invalidateCache();
-    return this.stripEmptyBlocks(portfolio);
+    return this.mapPortfolio(portfolio);
   }
-
-  // ─── REMOVE ────────────────────────────────────────────────────────────────
 
   async remove(id: number): Promise<void> {
     const existing = await this.prisma.portfolio.findUnique({
@@ -314,7 +291,6 @@ export class PortfoliosService {
       throw new NotFoundException('Không tìm thấy danh mục đầu tư');
     }
 
-    // Cascade delete handles sub-relations (onDelete: Cascade in schema)
     await this.prisma.portfolio.delete({
       where: { id },
     });
@@ -322,23 +298,94 @@ export class PortfoliosService {
     await this.invalidateCache();
   }
 
-  // ─── CACHE INVALIDATION ───────────────────────────────────────────────────
-
   private async invalidateCache(): Promise<void> {
     const patterns = ['portfolio:*', 'cache:*portfolios*'];
-    await Promise.all(patterns.map((p) => clearCache(this.redis, p, true)));
+    await Promise.all(
+      patterns.map((pattern) => clearCache(this.redis, pattern, true)),
+    );
   }
 
-  private stripEmptyBlocks(portfolio: PortfolioWithRelations): PortfolioResponse {
-    // Defensive against already-stripped input (e.g. a stale cache entry written by
-    // an older version of this method) where a relation key may be missing entirely.
-    const { stocks = [], information = [], reasons = [], signals = [], ...base } = portfolio;
+  private mapPortfolio(
+    portfolio: PortfolioWithRelations,
+  ): PortfolioResponseDto {
     return {
-      ...base,
-      ...(stocks.length > 0 ? { stocks } : {}),
-      ...(information.length > 0 ? { information } : {}),
-      ...(reasons.length > 0 ? { reasons } : {}),
-      ...(signals.length > 0 ? { signals } : {}),
+      id: portfolio.id,
+      planId: portfolio.planId,
+      plan: {
+        id: portfolio.plan.id,
+        name: portfolio.plan.name,
+        slug: portfolio.plan.slug,
+        level: portfolio.plan.level,
+      },
+      publishedAt: portfolio.publishedAt,
+      createdAt: portfolio.createdAt,
+      updatedAt: portfolio.updatedAt,
+      ...(portfolio.stocks.length > 0
+        ? { stocks: portfolio.stocks.map((stock) => this.mapStock(stock)) }
+        : {}),
+      ...(portfolio.information.length > 0
+        ? {
+            information: portfolio.information.map((information) =>
+              this.mapInformation(information),
+            ),
+          }
+        : {}),
+      ...(portfolio.reasons.length > 0
+        ? { reasons: portfolio.reasons.map((reason) => this.mapReason(reason)) }
+        : {}),
+      ...(portfolio.signals.length > 0
+        ? { signals: portfolio.signals.map((signal) => this.mapSignal(signal)) }
+        : {}),
+    };
+  }
+
+  private mapStock(
+    stock: PortfolioWithRelations['stocks'][number],
+  ): PortfolioStockResponseDto {
+    return {
+      id: stock.id,
+      symbol: stock.symbol,
+      sector: stock.sector,
+      purchaseDate: stock.purchaseDate,
+      costBasis: stock.costBasis,
+      marketPrice: stock.marketPrice,
+      quantity: stock.quantity,
+      note: stock.note,
+    };
+  }
+
+  private mapInformation(
+    information: PortfolioWithRelations['information'][number],
+  ): PortfolioInformationResponseDto {
+    return {
+      id: information.id,
+      month: information.month,
+      vnindexReturn: information.vnindexReturn,
+      recommendReturn: information.recommendReturn,
+    };
+  }
+
+  private mapReason(
+    reason: PortfolioWithRelations['reasons'][number],
+  ): PortfolioReasonResponseDto {
+    return {
+      id: reason.id,
+      type: reason.type,
+      symbol: reason.symbol,
+      content: reason.content,
+    };
+  }
+
+  private mapSignal(
+    signal: PortfolioWithRelations['signals'][number],
+  ): PortfolioSignalResponseDto {
+    return {
+      id: signal.id,
+      symbol: signal.symbol,
+      signalType: signal.signalType,
+      description: signal.description,
+      targetPrice: signal.targetPrice,
+      stopLoss: signal.stopLoss,
     };
   }
 }

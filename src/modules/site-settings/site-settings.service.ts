@@ -1,5 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { SiteSettingResponseDto } from './dto/update-site-settings.dto';
 
 export const DEFAULT_SITE_SETTINGS: Array<{
   key: string;
@@ -42,11 +43,43 @@ export const DEFAULT_SITE_SETTINGS: Array<{
   },
 ];
 
+const SITE_SETTINGS_LIST_LIMIT = DEFAULT_SITE_SETTINGS.length;
+
+const ALLOWED_IFRAME_ORIGINS = new Set([
+  'https://www.tradingview-widget.com',
+  'https://www.tradingview.com',
+  'https://tygiausd.org',
+  'https://www.widgets.investing.com',
+  'https://sslecal2.investing.com',
+  'https://trading.bsi.com.vn',
+  'https://www.google.com',
+]);
+
+const normalizeIframeUrl = (key: string, value: string): string => {
+  if (typeof value !== 'string') {
+    throw new BadRequestException(`Invalid iframe URL for ${key}`);
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol === 'https:' && ALLOWED_IFRAME_ORIGINS.has(url.origin)) {
+      return url.toString();
+    }
+  } catch {
+    throw new BadRequestException(`Invalid iframe URL for ${key}`);
+  }
+
+  throw new BadRequestException(`Invalid iframe URL for ${key}`);
+};
+
 @Injectable()
 export class SiteSettingsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async ensureDefaults() {
+  async ensureDefaults(): Promise<void> {
     for (const setting of DEFAULT_SITE_SETTINGS) {
       await this.prisma.siteSetting.upsert({
         where: { key: setting.key },
@@ -56,39 +89,59 @@ export class SiteSettingsService {
     }
   }
 
-  async findPublic(group?: string) {
+  async findPublic(group?: string): Promise<SiteSettingResponseDto[]> {
     await this.ensureDefaults();
     const settings = await this.prisma.siteSetting.findMany({
       where: group ? { group } : undefined,
       orderBy: { key: 'asc' },
+      take: SITE_SETTINGS_LIST_LIMIT,
     });
 
-    return settings;
+    return settings.map((setting) => this.mapSetting(setting));
   }
 
-  async findAdmin(group?: string) {
+  async findAdmin(group?: string): Promise<SiteSettingResponseDto[]> {
     await this.ensureDefaults();
-    return this.prisma.siteSetting.findMany({
+    const settings = await this.prisma.siteSetting.findMany({
       where: group ? { group } : undefined,
       orderBy: { key: 'asc' },
+      take: SITE_SETTINGS_LIST_LIMIT,
     });
+
+    return settings.map((setting) => this.mapSetting(setting));
   }
 
-  async updateMany(settings: Record<string, string>) {
-    const allowed = new Map(DEFAULT_SITE_SETTINGS.map((setting) => [setting.key, setting]));
-    const updates = Object.entries(settings).filter(([key]) => allowed.has(key));
+  async updateMany(
+    settings: Record<string, string>,
+  ): Promise<SiteSettingResponseDto[]> {
+    const allowed = new Map(
+      DEFAULT_SITE_SETTINGS.map((setting) => [setting.key, setting]),
+    );
+    const updates = Object.entries(settings).filter(([key]) =>
+      allowed.has(key),
+    );
 
     await this.prisma.$transaction(
       updates.map(([key, value]) => {
         const setting = allowed.get(key)!;
+        const normalizedValue = normalizeIframeUrl(key, value);
         return this.prisma.siteSetting.upsert({
           where: { key },
-          update: { value },
-          create: { ...setting, value },
+          update: { value: normalizedValue },
+          create: { ...setting, value: normalizedValue },
         });
       }),
     );
 
     return this.findAdmin('iframes');
+  }
+
+  private mapSetting(setting: SiteSettingResponseDto): SiteSettingResponseDto {
+    return {
+      key: setting.key,
+      value: setting.value,
+      label: setting.label,
+      group: setting.group,
+    };
   }
 }

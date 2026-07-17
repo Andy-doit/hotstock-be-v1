@@ -22,7 +22,6 @@ flowchart TD
         CategoriesModule
         ArticlesModule
         PortfoliosModule
-        UploadsModule
         DashboardModule
         TagsModule
         QueueModule
@@ -39,7 +38,6 @@ flowchart TD
     PortfoliosModule -.-> PrismaModule
     DashboardModule -.-> PrismaModule
     TagsModule -.-> PrismaModule
-    UploadsModule -.-> ConfigModule(AWS S3)
     QueueModule -.-> RedisModule
 ```
 
@@ -53,7 +51,6 @@ flowchart TD
 * **Helmet (`@fastify/helmet`)**: Sets security HTTP headers.
 * **CORS (`@fastify/cors`)**: Configured via `app.corsOrigins` env variable.
 * **Multipart (`@fastify/multipart`)**: Handles file upload parsing (up to 10MB limit) via Fastify before delegating to Controllers.
-* **Static Files (`@fastify/static`)**: Exposes `/uploads/` directory to serve local fallback files.
 
 ### Guards
 1. **`JwtAuthGuard`**: Extends Passport's `AuthGuard('jwt')`. Blocks requests lacking a valid Bearer token.
@@ -62,7 +59,7 @@ flowchart TD
 4. **`PlanGuard`**: Reads `@RequiredPlan()` metadata. Verifies if `req.user.planLevel` >= the required level.
 
 ### Interceptors
-1. **`AuditLogInterceptor`**: Intercepts `POST`, `PATCH`, `PUT`, `DELETE` methods. Extracts URL, Method, User ID, and IP, then performs an asynchronous (non-blocking) `prisma.auditLog.create()` operation to track state changes.
+1. **`AuditLogInterceptor`**: Intercepts `POST`, `PATCH`, `PUT`, `DELETE` methods. Extracts URL, Method, User ID, and IP, then queues an asynchronous `audit_log` job so audit persistence does not block the HTTP response.
 
 ### Filters
 1. **`HttpExceptionFilter`**: Catches unhandled exceptions and standardizes the JSON error response layout.
@@ -95,7 +92,7 @@ sequenceDiagram
     Prisma-->>Service: Return Data
     Service-->>Controller: Return Result
     Controller-->>AuditLogInterceptor: Intercept Response
-    AuditLogInterceptor--)Prisma: Async write Audit Log
+    AuditLogInterceptor--)Queue: Add audit_log job
     AuditLogInterceptor-->>Client: HTTP Response
 ```
 
@@ -153,7 +150,7 @@ sequenceDiagram
 * `GET /dashboard/stats`: Executes heavy aggregate queries -> `prisma.article.count`, `prisma.user.count`, `prisma.portfolio.count`, `prisma.user.groupBy`, `prisma.article.groupBy`.
 
 ### Uploads (`UploadsController` / `UploadsService`)
-* `POST /uploads/presign`: Generates an AWS S3 presigned URL using `@aws-sdk/s3-request-presigner`. No DB operations. Client uploads directly to S3.
+* There is no active `/uploads` endpoint in the current backend. AWS/S3 settings are optional placeholders until upload ownership is restored.
 
 ---
 
@@ -167,14 +164,14 @@ The backend heavily utilizes Prisma transactions to maintain referential integri
 4. **Portfolio Updates:** Completely replaces nested rows (`stocks`, `signals`, `reasons`) in a single ACID transaction to prevent partial state if an error occurs.
 
 ### Cache
-* There is **no application-level data caching** implemented via Redis (e.g., caching the Dashboard stats or popular Articles). 
-* Redis is exclusively used for `@nestjs/throttler` (rate limiting) and `BullMQ` (job queuing). 
+* Redis-backed read caching is implemented selectively for public article, category, plan, portfolio, and site-setting reads with schema-versioned keys.
+* Redis is also used for `@nestjs/throttler` rate limiting and BullMQ job queues.
 
 ### Queues
 * **BullMQ (`email` queue):** Handled by `QueueModule`. `AuthService` dispatches registration emails and OTPs to this queue, which are processed by a dedicated worker (`EmailProcessor`). This prevents slow SMTP servers from causing HTTP timeouts.
 
 ### Schedulers
-* There are no `@nestjs/schedule` CRON jobs visible. Maintenance (like clearing expired tokens) must be done manually or is currently neglected.
+* `JobsModule` registers scheduled cleanup for expired refresh tokens, expired reset OTP values, and old audit logs.
 
 ---
 
@@ -197,15 +194,15 @@ In endpoints like `GET /articles/:slug`, the application leverages a hybrid appr
 ### Code-Level Strengths
 1. **Excellent Consistency:** Error handling, validation, and database operations follow a strict, unified pattern.
 2. **ACID Compliance:** Excellent usage of `prisma.$transaction` for complex entity mutations (Portfolios, Articles) ensuring zero orphaned records.
-3. **Security Posture:** Implementations of Rate Limiting, Audit Logging, Argon2 hashing, Refresh Token rotation, and S3 Presigned URLs (avoiding server bottlenecks for file uploads) show mature backend architecture.
+3. **Security Posture:** Implementations of Rate Limiting, Audit Logging, Argon2 hashing, and Refresh Token rotation show mature backend architecture.
 
 ### Code-Level Weaknesses
 1. **N+1 Vulnerability in Dashboard:** `DashboardService` executes 8-10 separate aggregate queries sequentially. These could be grouped into a `Promise.all()` or a raw SQL materialized view for significantly better performance.
-2. **Audit Log Table Bloat:** `AuditLogInterceptor` blindly inserts rows for every state change. With no database partitioning or CRON cleanup script, this table will exponentially degrade database performance.
-3. **Missing DTO Sanitization:** While `ValidationPipe` is registered globally, if `whitelist: true` and `forbidNonWhitelisted: true` are not strictly enforced, malicious payload injection might be possible.
+2. **Audit Log Volume:** `AuditLogInterceptor` queues audit rows for every state-changing request. `CleanupService` prunes old rows, but high-volume deployments may still need partitioning or archival.
+3. **DTO Sanitization:** `ValidationPipe` is registered globally with whitelist and non-whitelisted rejection; keep this behavior covered by regression tests.
 
 ### Technical Debt
-1. **Dead Code Path:** `main.ts` configures Fastify static file serving for local uploads (`/public/uploads`), but `UploadsService` exclusively generates S3 Presigned URLs. The local static file handler is redundant in production if S3 is actively used.
-2. **No Data Caching:** Heavy read operations (like fetching the active portfolios or public articles list) hit PostgreSQL every single time. Introducing a `CacheInterceptor` backed by the existing Redis server would drastically lower DB CPU usage.
-3. **Token Typecasting:** `configService.get('jwt.accessExpiresIn') as unknown as number` in `auth.module.ts` circumvents TypeScript safety and could crash the JWT signer if env variables are misconfigured.
-4. **Expired Token Accumulation:** No scheduled job exists to prune the `RefreshToken` table of expired or revoked tokens. Over time, login performance will marginally degrade due to table size.
+1. **Upload Strategy:** Upload endpoints are currently absent. AWS/S3 dependencies and env values should remain optional until a concrete upload module is restored.
+2. **Cache Scope:** Read caching is handled explicitly in services with schema-versioned cache keys and `clearCache(...)`. Avoid reintroducing a broad global cache interceptor unless URL logging, auth variance, and invalidation semantics are reviewed first.
+3. **Resolved Token Expiry Typing:** `auth.module.ts` now reads JWT expiry with `SignOptions['expiresIn']`; the old manual cast risk has been resolved.
+4. **Cleanup Retention Policy:** `CleanupService` prunes expired refresh tokens, reset OTPs, and old audit logs. Keep retention windows explicit when production compliance requirements are finalized.

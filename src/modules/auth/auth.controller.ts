@@ -25,9 +25,11 @@ import { ChangePasswordDto } from './dto/change-password.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { ResetTokenResponseDto } from './dto/auth-command-response.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { JwtPayload } from './interfaces/jwt-payload.interface';
+import { CommandMessageResponseDto } from '../../common/dto/command-response.dto';
 
 @ApiTags('Auth')
 @Controller('auth')
@@ -76,11 +78,9 @@ export class AuthController {
     ]);
   }
 
-  // ─── LOGIN ─────────────────────────────────────────────────────────────────
-
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ medium: { limit: 10, ttl: 60000 } })
+  @Throttle({ medium: { limit: 30, ttl: 60000 } })
   @ApiOperation({
     summary: 'Đăng nhập',
     description: 'Đăng nhập bằng email và mật khẩu',
@@ -103,10 +103,8 @@ export class AuthController {
     return response;
   }
 
-  // ─── REGISTER ──────────────────────────────────────────────────────────────
-
   @Post('register')
-  @Throttle({ medium: { limit: 10, ttl: 60000 } })
+  @Throttle({ medium: { limit: 20, ttl: 60000 } })
   @ApiOperation({ summary: 'Đăng ký', description: 'Tạo tài khoản mới' })
   @ApiResponse({ status: 201, description: 'Đăng ký thành công' })
   @ApiResponse({ status: 409, description: 'Email đã được sử dụng' })
@@ -119,8 +117,6 @@ export class AuthController {
     this.setAuthCookies(reply, response);
     return response;
   }
-
-  // ─── REFRESH TOKEN ─────────────────────────────────────────────────────────
 
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
@@ -152,21 +148,23 @@ export class AuthController {
     return response;
   }
 
-  // ─── LOGOUT ────────────────────────────────────────────────────────────────
-
   @Post('logout')
   @HttpCode(HttpStatus.OK)
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Đăng xuất', description: 'Thu hồi refresh token' })
-  @ApiResponse({ status: 200, description: 'Đăng xuất thành công' })
+  @ApiResponse({
+    status: 200,
+    description: 'Đăng xuất thành công',
+    type: CommandMessageResponseDto,
+  })
   @ApiResponse({ status: 401, description: 'Chưa đăng nhập' })
   async logout(
     @CurrentUser() user: JwtPayload,
     @Body() dto: RefreshTokenDto,
     @Req() request: FastifyRequest,
     @Res({ passthrough: true }) reply: FastifyReply,
-  ): Promise<{ message: string }> {
+  ): Promise<CommandMessageResponseDto> {
     const refreshToken =
       dto.refresh_token ?? this.getCookieValue(request, 'refresh_token');
     if (refreshToken) {
@@ -176,8 +174,6 @@ export class AuthController {
     return { message: 'Đăng xuất thành công' };
   }
 
-  // ─── CHANGE PASSWORD ──────────────────────────────────────────────────────
-
   @Post('change-password')
   @HttpCode(HttpStatus.OK)
   @UseGuards(JwtAuthGuard)
@@ -186,21 +182,23 @@ export class AuthController {
     summary: 'Đổi mật khẩu',
     description: 'Đổi mật khẩu (cần đăng nhập)',
   })
-  @ApiResponse({ status: 200, description: 'Đổi mật khẩu thành công' })
+  @ApiResponse({
+    status: 200,
+    description: 'Đổi mật khẩu thành công',
+    type: CommandMessageResponseDto,
+  })
   @ApiResponse({ status: 401, description: 'Mật khẩu cũ không chính xác' })
   async changePassword(
     @CurrentUser() user: JwtPayload,
     @Body() dto: ChangePasswordDto,
-  ): Promise<{ message: string }> {
+  ): Promise<CommandMessageResponseDto> {
     await this.authService.changePassword(user.sub, dto);
     return { message: 'Đổi mật khẩu thành công' };
   }
 
-  // ─── FORGOT PASSWORD ──────────────────────────────────────────────────────
-
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ long: { limit: 3, ttl: 600000 } })
+  @Throttle({ long: { limit: 10, ttl: 600000 } })
   @ApiOperation({
     summary: 'Quên mật khẩu',
     description: 'Gửi mã OTP đặt lại mật khẩu qua email',
@@ -208,31 +206,32 @@ export class AuthController {
   @ApiResponse({
     status: 200,
     description: 'Nếu email tồn tại, mã OTP đã được gửi',
+    type: CommandMessageResponseDto,
   })
   @ApiResponse({ status: 429, description: 'Quá nhiều yêu cầu' })
   async forgotPassword(
     @Body() dto: ForgotPasswordDto,
-  ): Promise<{ message: string }> {
+  ): Promise<CommandMessageResponseDto> {
     return this.authService.forgotPassword(dto.email);
   }
 
-  // ─── VERIFY OTP ────────────────────────────────────────────────────────────
-
   @Post('verify-otp')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ long: { limit: 5, ttl: 600000 } })
+  @Throttle({ long: { limit: 20, ttl: 600000 } })
   @ApiOperation({
     summary: 'Xác minh OTP',
     description: 'Xác minh mã OTP và nhận reset token',
   })
-  @ApiResponse({ status: 200, description: 'OTP hợp lệ, trả về reset token' })
+  @ApiResponse({
+    status: 200,
+    description: 'OTP hợp lệ, trả về reset token',
+    type: ResetTokenResponseDto,
+  })
   @ApiResponse({ status: 400, description: 'OTP không hợp lệ hoặc hết hạn' })
   @ApiResponse({ status: 429, description: 'Quá nhiều lần thử' })
-  async verifyOtp(@Body() dto: VerifyOtpDto): Promise<{ reset_token: string }> {
+  async verifyOtp(@Body() dto: VerifyOtpDto): Promise<ResetTokenResponseDto> {
     return this.authService.verifyOtp(dto.email, dto.otp);
   }
-
-  // ─── RESET PASSWORD ───────────────────────────────────────────────────────
 
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
@@ -240,14 +239,18 @@ export class AuthController {
     summary: 'Đặt lại mật khẩu',
     description: 'Đặt lại mật khẩu bằng reset token',
   })
-  @ApiResponse({ status: 200, description: 'Đặt lại mật khẩu thành công' })
+  @ApiResponse({
+    status: 200,
+    description: 'Đặt lại mật khẩu thành công',
+    type: CommandMessageResponseDto,
+  })
   @ApiResponse({
     status: 401,
     description: 'Token không hợp lệ hoặc đã hết hạn',
   })
   async resetPassword(
     @Body() dto: ResetPasswordDto,
-  ): Promise<{ message: string }> {
+  ): Promise<CommandMessageResponseDto> {
     await this.authService.resetPassword(dto.resetToken, dto.newPassword);
     return { message: 'Đặt lại mật khẩu thành công' };
   }

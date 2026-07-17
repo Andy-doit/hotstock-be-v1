@@ -12,10 +12,10 @@ HotStock Backend API (`hotstock-be-v1`) is a monolithic REST API designed to ser
 * **Queue / Background Workers:** BullMQ (v5) with Redis backing
 * **Cache & Rate Limiting:** Redis (ioredis), `@nestjs/throttler` with a custom Redis storage adapter.
 * **Authentication:** JWT, Passport.js, Argon2 for password hashing
-* **Storage:** Local filesystem (with AWS S3 SDK `@aws-sdk/client-s3` present for potential cloud storage)
+* **Storage:** No active upload controller. AWS S3 configuration is optional placeholder debt for future upload work.
 * **Logging:** Pino (`pino-http`, `pino-pretty`)
 * **Monitoring / API Documentation:** `@nestjs/swagger`, `@nestjs/terminus` (Health checks), Bull Board (Queue UI)
-* **Testing framework:** Jest (Unit, E2E), Supertest
+* **Testing framework:** Node test runner with `ts-node` for focused regression tests.
 
 # Folder Structure
 
@@ -45,7 +45,6 @@ hotstock-be-v1/
 │   │   ├── queue/             # Background job processors (e.g., email sending)
 │   │   ├── redis/             # Redis client and connection management
 │   │   ├── tags/              # Tagging system for articles
-│   │   ├── uploads/           # File upload handling
 │   │   └── users/             # User profile and account management
 │   ├── prisma/                # Prisma service wrapper
 │   ├── app.module.ts          # Root module assembling the application
@@ -148,7 +147,6 @@ erDiagram
 * **ArticlesModule:** Core CMS module for publishing news or insights. Associates articles with specific plans to enforce paywalls.
 * **PortfoliosModule:** Financial advice core. Exposes recommended stocks, purchase signals (buy/sell/stop-loss), and performance stats, strictly gated by plans.
 * **Categories & Tags Modules:** Organizes articles and contents.
-* **UploadsModule:** Parses `multipart/form-data` to save files locally in `public/uploads/` (with a potential AWS S3 implementation present in package dependencies).
 * **QueueModule:** Orchestrates background tasks via BullMQ and integrates with Bull Board for a visual queue dashboard.
 * **DashboardModule:** Aggregates portfolio and user analytics for frontend consumption.
 * **HealthModule:** Terminus-based liveness probes (`/health`) for Kubernetes/Docker orchestrators.
@@ -157,7 +155,7 @@ erDiagram
 
 The API follows RESTful standards.
 * **Prefix:** `/api/v1`
-* **Content-Type:** `application/json` (except `/uploads` endpoints).
+* **Content-Type:** `application/json`.
 * **Pagination & Filtering:** Implemented on index routes.
 * **Swagger Documentation:** Available in non-production environments at `/api/docs`.
 
@@ -180,7 +178,7 @@ Currently, the primary queue is `email`, used for sending registration confirmat
 
 * **Redis:** Used heavily for both `@nestjs/throttler` (rate limiting) and `BullMQ` (job queuing).
 * **SMTP Server:** `nodemailer` is configured (likely via environmental variables) to dispatch transactional emails.
-* **AWS S3:** Included in `package.json` (`@aws-sdk/client-s3`), indicating possible cloud file storage capabilities alongside local uploads.
+* **AWS S3:** Optional placeholder configuration only; the current backend has no active upload endpoint.
 
 # Infrastructure
 
@@ -189,19 +187,19 @@ Currently, the primary queue is `email`, used for sending registration confirmat
 
 # Deployment
 
-The app is built as a stateless Node.js container (`dist/main.js`). 
+The app is built as a stateless Node.js container (`dist/src/main.js`). 
 * Relies on external managed services (DB, Redis) to maintain state.
 * Configuration is entirely environment variable-based (`.env`).
 * Prisma migrations (`prisma migrate deploy`) are executed during CI/CD or startup to align the database schema.
 
 # Known Technical Debt
 
-* **Local Uploads vs. S3:** The codebase includes both Fastify static local uploads and AWS S3 SDK. Depending on the environment, local uploads without a shared volume in multi-instance deployments will lead to broken images.
-* **Manual Type Casting in Configs:** Token expiration config in `auth.module.ts` forces a manual typecast (`as unknown as number`).
+* **Upload Strategy:** File upload endpoints are currently absent. Keep AWS/local upload documentation and env requirements optional until the feature is restored.
+* **JWT Expiry Config:** `auth.module.ts` uses `SignOptions['expiresIn']` for token expiration config; avoid reintroducing manual casts for JWT options.
 
 # Potential Risks
 
-* **Audit Log Bloat:** `AuditLogInterceptor` creates a DB row for *every* POST/PUT/PATCH/DELETE request. Over time, the `AuditLog` table will grow massive without a cleanup strategy or partition mechanism.
+* **Audit Log Volume:** `AuditLogInterceptor` creates a DB row for *every* POST/PUT/PATCH/DELETE request. `CleanupService` prunes old logs, but high-volume production deployments may still need partitioning or archival.
 * **Redis Dependency:** Fastify throttler and BullMQ both heavily rely on Redis. If Redis goes down, rate-limiting will fail (potentially rejecting all requests) and queues will halt.
 * **Throttler Implementation:** The custom Redis Throttler storage class replaces native NestJS solutions. It must be thoroughly tested for race conditions under high concurrency.
 
@@ -219,6 +217,6 @@ The app is built as a stateless Node.js container (`dist/main.js`).
 
 # Questions or Unknown Areas
 
-* **Cloud Storage Strategy:** Is the AWS S3 SDK utilized actively in `UploadsService`, or is it falling back entirely to local storage?
+* **Cloud Storage Strategy:** Which upload/storage path should be restored if article media upload becomes a backend responsibility again?
 * **Analytics/Events Integration:** How are user views on articles tracked? Is it synchronous, or delegated to a separate data pipeline?
 * **Email Delivery Service:** Which SMTP provider is intended for production (e.g., SendGrid, AWS SES), and are bounce/complaint webhooks implemented?

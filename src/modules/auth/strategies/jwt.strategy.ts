@@ -18,10 +18,6 @@ function getCookieValue(request: FastifyRequest, name: string): string | null {
   return cookie ? decodeURIComponent(cookie.slice(name.length + 1)) : null;
 }
 
-/**
- * Passport JWT strategy.
- * Extracts Bearer token, verifies it, and attaches a fresh user snapshot to request.user.
- */
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(

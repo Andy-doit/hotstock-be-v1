@@ -15,24 +15,25 @@ import {
   ApiBearerAuth,
 } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
-import { Plan, Role } from '@prisma/client';
+import { Role } from '@prisma/client';
 import { PlansService } from './plans.service';
 import { CreatePlanDto } from './dto/create-plan.dto';
 import { UpdatePlanDto } from './dto/update-plan.dto';
 import {
   CreatePlanFieldVisibilityDto,
+  FieldVisibilityResponseDto,
   UpdatePlanFieldVisibilityDto,
 } from './dto/plan-field-visibility.dto';
+import { SubscriptionPlanResponseDto } from './dto/plan-response.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
+import { CommandMessageResponseDto } from '../../common/dto/command-response.dto';
 
 @ApiTags('Plans')
 @Controller('plans')
 export class PlansController {
   constructor(private readonly plansService: PlansService) {}
-
-  // ─── PUBLIC: list active plans ─────────────────────────────────────────────
 
   @Get()
   @SkipThrottle()
@@ -41,11 +42,9 @@ export class PlansController {
     description: 'Trả về tất cả gói đang hoạt động, sắp xếp theo sortOrder',
   })
   @ApiResponse({ status: 200, description: 'Danh sách gói' })
-  async findAll(): Promise<Plan[]> {
+  async findAll(): Promise<SubscriptionPlanResponseDto[]> {
     return this.plansService.findAll();
   }
-
-  // ─── ADMIN: list all plans including inactive ─────────────────────────────
 
   @Get('admin')
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -58,11 +57,9 @@ export class PlansController {
   @ApiResponse({ status: 200, description: 'Danh sách tất cả gói' })
   @ApiResponse({ status: 401, description: 'Chưa đăng nhập' })
   @ApiResponse({ status: 403, description: 'Không có quyền' })
-  async findAllAdmin(): Promise<Plan[]> {
+  async findAllAdmin(): Promise<SubscriptionPlanResponseDto[]> {
     return this.plansService.findAllAdmin();
   }
-
-  // ─── PUBLIC: get plan by slug ──────────────────────────────────────────────
 
   @Get(':slug')
   @ApiOperation({
@@ -71,11 +68,11 @@ export class PlansController {
   })
   @ApiResponse({ status: 200, description: 'Thông tin gói' })
   @ApiResponse({ status: 404, description: 'Không tìm thấy gói' })
-  async findBySlug(@Param('slug') slug: string): Promise<Plan> {
+  async findBySlug(
+    @Param('slug') slug: string,
+  ): Promise<SubscriptionPlanResponseDto> {
     return this.plansService.findBySlug(slug);
   }
-
-  // ─── ADMIN: create plan ────────────────────────────────────────────────────
 
   @Post()
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -89,11 +86,11 @@ export class PlansController {
   @ApiResponse({ status: 401, description: 'Chưa đăng nhập' })
   @ApiResponse({ status: 403, description: 'Không có quyền' })
   @ApiResponse({ status: 409, description: 'Slug đã tồn tại' })
-  async create(@Body() dto: CreatePlanDto): Promise<Plan> {
+  async create(
+    @Body() dto: CreatePlanDto,
+  ): Promise<SubscriptionPlanResponseDto> {
     return this.plansService.create(dto);
   }
-
-  // ─── ADMIN: update plan ────────────────────────────────────────────────────
 
   @Patch(':slug')
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -110,7 +107,7 @@ export class PlansController {
   async update(
     @Param('slug') slug: string,
     @Body() dto: UpdatePlanDto,
-  ): Promise<Plan> {
+  ): Promise<SubscriptionPlanResponseDto> {
     return this.plansService.update(slug, dto);
   }
 
@@ -131,11 +128,9 @@ export class PlansController {
     @Param('slug') slug: string,
     @Body()
     dto: CreatePlanFieldVisibilityDto | UpdatePlanFieldVisibilityDto,
-  ) {
+  ): Promise<FieldVisibilityResponseDto> {
     return this.plansService.upsertFieldVisibility(slug, dto);
   }
-
-  // ─── ADMIN: delete plan ────────────────────────────────────────────────────
 
   @Delete(':slug')
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -145,12 +140,18 @@ export class PlansController {
     summary: 'Xóa gói',
     description: 'Không thể xóa gói đang có người dùng sử dụng',
   })
-  @ApiResponse({ status: 200, description: 'Gói đã được xóa' })
+  @ApiResponse({
+    status: 200,
+    description: 'Gói đã được xóa',
+    type: CommandMessageResponseDto,
+  })
   @ApiResponse({ status: 400, description: 'Gói đang có người dùng sử dụng' })
   @ApiResponse({ status: 401, description: 'Chưa đăng nhập' })
   @ApiResponse({ status: 403, description: 'Không có quyền' })
   @ApiResponse({ status: 404, description: 'Không tìm thấy gói' })
-  async remove(@Param('slug') slug: string): Promise<{ message: string }> {
+  async remove(
+    @Param('slug') slug: string,
+  ): Promise<CommandMessageResponseDto> {
     await this.plansService.remove(slug);
     return { message: 'Gói đã được xóa' };
   }

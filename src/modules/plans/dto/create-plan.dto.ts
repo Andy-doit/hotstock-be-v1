@@ -128,7 +128,8 @@ export class CreatePlanDto {
   sortOrder?: number;
 
   @ApiPropertyOptional({
-    description: 'Cấu hình các phần dữ liệu/section được phép hiển thị theo plan',
+    description:
+      'Cấu hình các phần dữ liệu/section được phép hiển thị theo plan',
     type: CreatePlanFieldVisibilityDto,
   })
   @IsOptional()

@@ -7,34 +7,21 @@ import {
   Logger,
 } from '@nestjs/common';
 import { FastifyReply, FastifyRequest } from 'fastify';
+import {
+  getSafeErrorLogMessage,
+  getSafeErrorLogStack,
+  redactSensitiveLogValue,
+} from '../utils/log-redaction';
 
 interface ErrorResponse {
   statusCode: number;
+  code: string;
   message: string;
   error: string;
   timestamp: string;
   path: string;
 }
 
-/**
- * Global exception filter that catches ALL exceptions — both NestJS
- * HttpExceptions and unexpected errors (TypeErrors, Prisma errors, etc.) —
- * and returns a consistent, sanitized JSON response shape.
- *
- * Unexpected (non-HttpException) errors always return a generic 500 message
- * to the client; the real error and stack are logged server-side only, so
- * a bug never leaks internal details (DB schema, file paths, library
- * internals) to callers.
- *
- * Response format:
- * {
- *   statusCode: 400,
- *   message: "...",
- *   error: "Bad Request",
- *   timestamp: "2024-01-01T00:00:00.000Z",
- *   path: "/api/v1/..."
- * }
- */
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger(HttpExceptionFilter.name);
@@ -52,8 +39,9 @@ export class HttpExceptionFilter implements ExceptionFilter {
     // Extract message — for unexpected errors, never forward the real
     // error message to the client (may contain internal details).
     let message: string;
+    let exceptionResponse: string | object | undefined;
     if (isHttpException) {
-      const exceptionResponse = exception.getResponse();
+      exceptionResponse = exception.getResponse();
       if (typeof exceptionResponse === 'string') {
         message = exceptionResponse;
       } else if (
@@ -62,7 +50,6 @@ export class HttpExceptionFilter implements ExceptionFilter {
       ) {
         const responseObj = exceptionResponse as Record<string, unknown>;
         if (Array.isArray(responseObj.message)) {
-          // class-validator returns an array of messages
           message = (responseObj.message as string[]).join('; ');
         } else if (typeof responseObj.message === 'string') {
           message = responseObj.message;
@@ -75,31 +62,39 @@ export class HttpExceptionFilter implements ExceptionFilter {
     } else {
       message = 'Internal Server Error';
     }
-
-    // Map status code to error name
+    const internalServerErrorStatus: number = HttpStatus.INTERNAL_SERVER_ERROR;
+    if (status >= internalServerErrorStatus) {
+      message = 'Internal Server Error';
+    }
     const error = this.getErrorName(status);
+    const code = this.getErrorCode(status, exceptionResponse);
+    const requestPath = request.url.split('?')[0];
 
     const errorResponse: ErrorResponse = {
       statusCode: status,
+      code,
       message,
       error,
       timestamp: new Date().toISOString(),
-      path: request.url,
+      path: requestPath,
     };
 
     // Log 5xx errors as errors, 4xx as warnings. For non-HttpException
     // errors, log the real message/stack server-side even though the
     // client only ever sees the generic message above.
-    if (status >= HttpStatus.INTERNAL_SERVER_ERROR) {
+    if (status >= internalServerErrorStatus) {
       const err =
         exception instanceof Error ? exception : new Error(String(exception));
+      const safeMessage = getSafeErrorLogMessage(err);
+      const safeStack = getSafeErrorLogStack(err);
       this.logger.error(
-        `${request.method} ${request.url} ${status} - ${err.message}`,
-        err.stack,
+        `${request.method} ${requestPath} ${status} - ${safeMessage}`,
+        safeStack,
       );
     } else {
+      const safeMessage = redactSensitiveLogValue(message);
       this.logger.warn(
-        `${request.method} ${request.url} ${status} - ${message}`,
+        `${request.method} ${requestPath} ${status} - ${safeMessage}`,
       );
     }
 
@@ -123,5 +118,34 @@ export class HttpExceptionFilter implements ExceptionFilter {
     };
 
     return statusNames[status] || 'Error';
+  }
+
+  private getErrorCode(
+    status: number,
+    exceptionResponse?: string | object,
+  ): string {
+    if (typeof exceptionResponse === 'object' && exceptionResponse !== null) {
+      const responseObj = exceptionResponse as Record<string, unknown>;
+      if (typeof responseObj.code === 'string') {
+        return responseObj.code;
+      }
+    }
+
+    const statusCodes: Record<number, string> = {
+      [HttpStatus.BAD_REQUEST]: 'BAD_REQUEST',
+      [HttpStatus.UNAUTHORIZED]: 'UNAUTHORIZED',
+      [HttpStatus.FORBIDDEN]: 'FORBIDDEN',
+      [HttpStatus.NOT_FOUND]: 'NOT_FOUND',
+      [HttpStatus.METHOD_NOT_ALLOWED]: 'METHOD_NOT_ALLOWED',
+      [HttpStatus.CONFLICT]: 'CONFLICT',
+      [HttpStatus.UNPROCESSABLE_ENTITY]: 'UNPROCESSABLE_ENTITY',
+      [HttpStatus.TOO_MANY_REQUESTS]: 'RATE_LIMITED',
+      [HttpStatus.INTERNAL_SERVER_ERROR]: 'INTERNAL_ERROR',
+      [HttpStatus.BAD_GATEWAY]: 'BAD_GATEWAY',
+      [HttpStatus.SERVICE_UNAVAILABLE]: 'SERVICE_UNAVAILABLE',
+      [HttpStatus.GATEWAY_TIMEOUT]: 'GATEWAY_TIMEOUT',
+    };
+
+    return statusCodes[status] || 'ERROR';
   }
 }

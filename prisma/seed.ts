@@ -11,6 +11,38 @@ const prismaDynamic = prisma as PrismaClient & {
     }) => Promise<unknown>;
   };
 };
+const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const LONG_SECRET_PATTERN = /\b[A-Za-z0-9_-]{24,}\b/g;
+
+function maskEmail(value: string): string {
+  const [localPart, domain = ''] = value.split('@');
+  const visibleLocal = localPart.slice(0, 2);
+  const visibleDomain = domain.slice(0, 2);
+  return `${visibleLocal || '**'}***@${visibleDomain || '**'}***`;
+}
+
+function maskSensitiveSeedLogValue(value: string): string {
+  return value
+    .replace(EMAIL_PATTERN, (email) => maskEmail(email))
+    .replace(LONG_SECRET_PATTERN, '[redacted-secret]');
+}
+
+function getSafeSeedErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return maskSensitiveSeedLogValue(error.message);
+  }
+
+  if (
+    typeof error === 'string' ||
+    typeof error === 'number' ||
+    typeof error === 'boolean' ||
+    typeof error === 'bigint'
+  ) {
+    return maskSensitiveSeedLogValue(error.toString());
+  }
+
+  return 'Unknown seed error';
+}
 
 interface PlanSeed {
   name: string;
@@ -576,7 +608,10 @@ async function seedUsers(seedAdminPassword: string): Promise<void> {
     const planId = planIdBySlug[user.planSlug];
 
     if (!planId) {
-      console.warn(`  ⚠️ Skip user "${user.email}" because plan "${user.planSlug}" was not found`);
+      const userLabel = maskEmail(user.email);
+      console.warn(
+        `  ⚠️ Skip user "${userLabel}" because plan "${user.planSlug}" was not found`,
+      );
       continue;
     }
 
@@ -603,7 +638,10 @@ async function seedUsers(seedAdminPassword: string): Promise<void> {
       },
     });
 
-    console.log(`  ✅ Test user "${upserted.email}" attached to plan "${user.planSlug}"`);
+    const seededUserLabel = maskEmail(upserted.email);
+    console.log(
+      `  ✅ Test user "${seededUserLabel}" attached to plan "${user.planSlug}"`,
+    );
   }
 
   console.log('  ℹ️ Test users seeded with configured password');
@@ -733,10 +771,10 @@ async function main(): Promise<void> {
   });
 
   if (existingAdmin && !forceSeed) {
+    const existingAdminLabel = maskEmail(existingAdmin.email);
     console.log(
-      `🌱 Seed skipped: admin account already exists (${existingAdmin.email}).`,
+      `🌱 Admin account already exists (${existingAdminLabel}); refreshing non-destructive seed data.`,
     );
-    return;
   }
 
   if (existingAdmin && forceSeed) {
@@ -805,7 +843,8 @@ async function main(): Promise<void> {
       confirmed: true,
     },
   });
-  console.log(`  ✅ Admin user "${admin.email}" (id: ${admin.id})`);
+  const adminLabel = maskEmail(admin.email);
+  console.log(`  ✅ Admin user "${adminLabel}" (id: ${admin.id})`);
 
   const customAdminPassword = configuredAdminPassword;
   const customAdminPasswordHash = await hashPassword(customAdminPassword);
@@ -828,7 +867,10 @@ async function main(): Promise<void> {
       confirmed: true,
     },
   });
-  console.log(`  ✅ Custom Admin user "${customAdmin.email}" (id: ${customAdmin.id})`);
+  const customAdminLabel = maskEmail(customAdmin.email);
+  console.log(
+    `  ✅ Custom Admin user "${customAdminLabel}" (id: ${customAdmin.id})`,
+  );
 
   // Requested admin account
   const requestedAdminPassword = configuredAdminPassword;
@@ -851,7 +893,10 @@ async function main(): Promise<void> {
       confirmed: true,
     },
   });
-  console.log(`  ✅ Requested Admin user "${requestedAdmin.email}" (id: ${requestedAdmin.id})`);
+  const requestedAdminLabel = maskEmail(requestedAdmin.email);
+  console.log(
+    `  ✅ Requested Admin user "${requestedAdminLabel}" (id: ${requestedAdmin.id})`,
+  );
 
   await seedUsers(configuredAdminPassword);
   await seedPortfolios();
@@ -860,8 +905,8 @@ async function main(): Promise<void> {
 }
 
 main()
-  .catch((error: Error) => {
-    console.error('❌ Seed failed:', error);
+  .catch((error: unknown) => {
+    console.error('❌ Seed failed:', getSafeSeedErrorMessage(error));
     process.exit(1);
   })
   .finally(async () => {

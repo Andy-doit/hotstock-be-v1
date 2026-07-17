@@ -21,11 +21,18 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
-import { JwtPayload, ResetTokenPayload } from './interfaces/jwt-payload.interface';
-
-// ─── Response types ────────────────────────────────────────────────────────────
+import { ResetTokenResponseDto } from './dto/auth-command-response.dto';
+import { CommandMessageResponseDto } from '../../common/dto/command-response.dto';
+import { getSafeErrorLogMessage } from '../../common/utils/log-redaction';
+import {
+  JwtPayload,
+  ResetTokenPayload,
+} from './interfaces/jwt-payload.interface';
 
 type UserWithPlan = User & { plan: Plan | null };
+
+const RESET_OTP_TTL_SECONDS = 600;
+const RESET_OTP_MAX_ATTEMPTS = 5;
 
 interface UserProfile {
   id: number;
@@ -52,8 +59,6 @@ export interface TokensResponse {
   refresh_token: string;
 }
 
-// ─── Service ───────────────────────────────────────────────────────────────────
-
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -66,14 +71,11 @@ export class AuthService {
     @InjectQueue('email') private readonly emailQueue: Queue,
   ) {}
 
-  // ─── LOGIN ─────────────────────────────────────────────────────────────────
-
   async login(
     dto: LoginDto,
     ip: string,
     userAgent: string,
   ): Promise<AuthResponse> {
-    // Find user by email
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email },
       include: { plan: true },
@@ -84,23 +86,20 @@ export class AuthService {
     }
 
     if (user.blocked) {
-      throw new UnauthorizedException('Tài khoản của bạn đã bị khóa. Vui lòng liên hệ hỗ trợ.');
+      throw new UnauthorizedException(
+        'Tài khoản của bạn đã bị khóa. Vui lòng liên hệ hỗ trợ.',
+      );
     }
-
-    // Verify password
-    const isPasswordValid = await argon2.verify(user.passwordHash, dto.password);
+    const isPasswordValid = await argon2.verify(
+      user.passwordHash,
+      dto.password,
+    );
     if (!isPasswordValid) {
       throw new UnauthorizedException('Invalid credentials');
     }
-
-    // Generate tokens
-    const tokens = await this.generateTokens(user);
-
-    // Save refresh token hash
+    const tokens = this.generateTokens(user);
     await this.saveRefreshToken(user.id, tokens.refresh_token, ip, userAgent);
-
-    // Audit log
-    await this.writeAuditLog(user.id, 'LOGIN', 'auth', ip, userAgent);
+    this.writeAuditLog(user.id, 'LOGIN', 'auth', ip, userAgent);
 
     return {
       ...tokens,
@@ -108,19 +107,16 @@ export class AuthService {
     };
   }
 
-  // ─── REGISTER ──────────────────────────────────────────────────────────────
-
   async register(dto: RegisterDto): Promise<AuthResponse> {
-    // Validate confirmPassword matches password
     if (dto.password !== dto.confirmPassword) {
       throw new BadRequestException('Mật khẩu xác nhận không khớp');
     }
 
     if (dto.termsAccepted !== true) {
-      throw new BadRequestException('Bạn cần đồng ý với điều khoản sử dụng và cho phép xử lý thông tin cá nhân');
+      throw new BadRequestException(
+        'Bạn cần đồng ý với điều khoản sử dụng và cho phép xử lý thông tin cá nhân',
+      );
     }
-
-    // Check email uniqueness
     const existing = await this.prisma.user.findUnique({
       where: { email: dto.email },
     });
@@ -128,8 +124,6 @@ export class AuthService {
     if (existing) {
       throw new ConflictException('Email đã được sử dụng');
     }
-
-    // Hash password with argon2id
     const passwordHash = await argon2.hash(dto.password, {
       type: argon2.argon2id,
       memoryCost: 65536,
@@ -138,8 +132,6 @@ export class AuthService {
     });
 
     const consentAcceptedAt = new Date();
-
-    // Create user
     const user = await this.prisma.user.create({
       data: {
         email: dto.email,
@@ -156,11 +148,7 @@ export class AuthService {
       },
       include: { plan: true },
     });
-
-    // Generate tokens
-    const tokens = await this.generateTokens(user);
-
-    // Save refresh token
+    const tokens = this.generateTokens(user);
     await this.saveRefreshToken(user.id, tokens.refresh_token, null, null);
 
     return {
@@ -169,63 +157,87 @@ export class AuthService {
     };
   }
 
-  // ─── REFRESH ───────────────────────────────────────────────────────────────
-
   async refresh(
     refreshToken: string,
     ip: string,
     userAgent: string,
   ): Promise<TokensResponse> {
     const tokenHash = this.hashToken(refreshToken);
-
-    // Find valid refresh token
     const storedToken = await this.prisma.refreshToken.findFirst({
       where: {
         tokenHash,
-        // Remove revokedAt: null to detect reuse
+        // Revoked tokens stay queryable here so reuse can revoke every active session.
       },
       include: {
         user: { include: { plan: true } },
       },
     });
 
-    if (!storedToken || storedToken.expiresAt < new Date()) {
+    if (!storedToken) {
       throw new UnauthorizedException('Invalid or expired refresh token');
     }
 
     if (storedToken.revokedAt !== null) {
-      // Breach detected: Token reuse! Revoke all tokens for this user.
-      await this.prisma.refreshToken.updateMany({
-        where: { userId: storedToken.userId, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
-      throw new UnauthorizedException('Security alert: Token reuse detected. All sessions revoked.');
+      await this.rejectRefreshTokenReuse(storedToken.userId);
+    }
+
+    if (storedToken.expiresAt < new Date()) {
+      throw new UnauthorizedException('Invalid or expired refresh token');
     }
 
     if (storedToken.user.blocked) {
-      throw new UnauthorizedException('Tài khoản của bạn đã bị khóa. Vui lòng liên hệ hỗ trợ.');
+      throw new UnauthorizedException(
+        'Tài khoản của bạn đã bị khóa. Vui lòng liên hệ hỗ trợ.',
+      );
     }
+    const tokens = this.generateTokens(storedToken.user);
+    const newTokenHash = this.hashToken(tokens.refresh_token);
+    const newTokenExpiresAt = this.getRefreshTokenExpiresAt();
 
-    // Single-use rotation: soft-delete old + generate new in parallel
-    const [tokens] = await Promise.all([
-      this.generateTokens(storedToken.user),
-      this.prisma.refreshToken.update({
-        where: { id: storedToken.id },
+    const tokenWasRotated = await this.prisma.$transaction(async (tx) => {
+      const consumeResult = await tx.refreshToken.updateMany({
+        where: {
+          id: storedToken.id,
+          revokedAt: null,
+        },
         data: { revokedAt: new Date() },
-      }),
-    ]);
+      });
 
-    await this.saveRefreshToken(storedToken.userId, tokens.refresh_token, ip, userAgent);
+      if (consumeResult.count !== 1) {
+        return false;
+      }
+
+      await tx.refreshToken.create({
+        data: {
+          tokenHash: newTokenHash,
+          userId: storedToken.userId,
+          expiresAt: newTokenExpiresAt,
+          ipAddress: ip,
+          userAgent,
+        },
+      });
+
+      return true;
+    });
+
+    if (!tokenWasRotated) {
+      const latestTokenState = await this.prisma.refreshToken.findUnique({
+        where: { id: storedToken.id },
+        select: { revokedAt: true },
+      });
+
+      if (latestTokenState && latestTokenState.revokedAt !== null) {
+        await this.rejectRefreshTokenReuse(storedToken.userId);
+      }
+
+      throw new UnauthorizedException('Invalid or expired refresh token');
+    }
 
     return tokens;
   }
 
-  // ─── LOGOUT ────────────────────────────────────────────────────────────────
-
   async logout(userId: number, refreshToken: string): Promise<void> {
     const tokenHash = this.hashToken(refreshToken);
-
-    // Revoke the specific refresh token
     await this.prisma.refreshToken.updateMany({
       where: {
         tokenHash,
@@ -236,12 +248,8 @@ export class AuthService {
         revokedAt: new Date(),
       },
     });
-
-    // Audit log
-    await this.writeAuditLog(userId, 'LOGOUT', 'auth', null, null);
+    this.writeAuditLog(userId, 'LOGOUT', 'auth', null, null);
   }
-
-  // ─── CHANGE PASSWORD ──────────────────────────────────────────────────────
 
   async changePassword(userId: number, dto: ChangePasswordDto): Promise<void> {
     const user = await this.prisma.user.findUnique({
@@ -251,22 +259,19 @@ export class AuthService {
     if (!user) {
       throw new UnauthorizedException('User not found');
     }
-
-    // Verify old password
-    const isOldPasswordValid = await argon2.verify(user.passwordHash, dto.oldPassword);
+    const isOldPasswordValid = await argon2.verify(
+      user.passwordHash,
+      dto.oldPassword,
+    );
     if (!isOldPasswordValid) {
       throw new UnauthorizedException('Mật khẩu cũ không chính xác');
     }
-
-    // Hash new password
     const passwordHash = await argon2.hash(dto.newPassword, {
       type: argon2.argon2id,
       memoryCost: 65536,
       timeCost: 3,
       parallelism: 1,
     });
-
-    // Update password and invalidate all sessions
     await this.prisma.$transaction([
       this.prisma.user.update({
         where: { id: userId },
@@ -279,15 +284,11 @@ export class AuthService {
         where: { userId },
       }),
     ]);
-
-    // Audit log
-    await this.writeAuditLog(userId, 'CHANGE_PASSWORD', 'auth', null, null);
+    this.writeAuditLog(userId, 'CHANGE_PASSWORD', 'auth', null, null);
   }
 
-  // ─── FORGOT PASSWORD ──────────────────────────────────────────────────────
-
-  async forgotPassword(email: string): Promise<{ message: string }> {
-    // Always return the same response to prevent email enumeration
+  async forgotPassword(email: string): Promise<CommandMessageResponseDto> {
+    // Keep this response identical for existing and missing emails.
     const response = { message: 'Nếu email tồn tại, mã OTP đã được gửi' };
 
     const user = await this.prisma.user.findUnique({
@@ -298,59 +299,69 @@ export class AuthService {
       return response;
     }
 
-    // FIX: Use crypto.randomBytes for cryptographically secure OTP
-    const otp = parseInt(randomBytes(3).toString('hex'), 16) % 900000 + 100000;
+    // OTPs must be generated with cryptographic randomness.
+    const otp =
+      (parseInt(randomBytes(3).toString('hex'), 16) % 900000) + 100000;
 
-    // FIX: Pipeline Redis operations — 3 commands in 1 round-trip
+    const otpKey = `otp:${email}`;
+    const attemptsKey = `otp_attempts:${email}`;
     const pipeline = this.redis.pipeline();
-    pipeline.set(`otp:${email}`, otp.toString(), 'EX', 600);
-    pipeline.set(`otp_attempts:${email}`, '0', 'EX', 600);
+    pipeline.set(otpKey, otp.toString(), 'EX', RESET_OTP_TTL_SECONDS);
+    pipeline.set(attemptsKey, '0', 'EX', RESET_OTP_TTL_SECONDS);
     await pipeline.exec();
-
-    // Dispatch email job via BullMQ
     await this.emailQueue.add('send_otp', {
       to: email,
       subject: 'Mã OTP đặt lại mật khẩu',
       otp,
     });
 
-    this.logger.log(`OTP dispatched for email: ${email}`);
+    this.logger.log(`OTP dispatched for user id: ${user.id}`);
 
     return response;
   }
 
-  // ─── VERIFY OTP ────────────────────────────────────────────────────────────
-
-  async verifyOtp(email: string, otp: string): Promise<{ reset_token: string }> {
-    // FIX: Pipeline Redis operations — get attempts + get OTP in single round-trip
+  async verifyOtp(email: string, otp: string): Promise<ResetTokenResponseDto> {
+    const otpKey = `otp:${email}`;
+    const attemptsKey = `otp_attempts:${email}`;
     const pipeline = this.redis.pipeline();
-    pipeline.get(`otp_attempts:${email}`);
-    pipeline.get(`otp:${email}`);
+    pipeline.get(attemptsKey);
+    pipeline.get(otpKey);
+    pipeline.ttl(otpKey);
     const results = await pipeline.exec();
     if (!results) {
       throw new BadRequestException('OTP đã hết hạn');
     }
-    const attemptsStr = String(results[0]?.[1] ?? '');
-    const storedOtp = results[1]?.[1] as string | null;
+    const attemptsValue = results[0]?.[1];
+    const attemptsStr = typeof attemptsValue === 'string' ? attemptsValue : '';
+    const storedOtpValue = results[1]?.[1];
+    const storedOtp =
+      typeof storedOtpValue === 'string' ? storedOtpValue : null;
+    const otpTtlValue = results[2]?.[1];
+    const otpTtlSeconds =
+      typeof otpTtlValue === 'number' && otpTtlValue > 0
+        ? otpTtlValue
+        : RESET_OTP_TTL_SECONDS;
 
-    const attempts = parseInt(attemptsStr, 10);
+    const parsedAttempts = parseInt(attemptsStr, 10);
+    const attempts = Number.isFinite(parsedAttempts) ? parsedAttempts : 0;
 
-    if (attempts >= 5) {
-      await this.redis.del(`otp:${email}`, `otp_attempts:${email}`);
+    if (!storedOtp) {
+      await this.redis.del(attemptsKey);
+      throw new BadRequestException('OTP đã hết hạn');
+    }
+
+    if (attempts >= RESET_OTP_MAX_ATTEMPTS) {
+      await this.redis.del(otpKey, attemptsKey);
       throw new HttpException(
         'Quá nhiều lần thử. Vui lòng yêu cầu OTP mới',
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
 
-    // Increment attempt counter (separate to avoid race)
-    await this.redis.incr(`otp_attempts:${email}`);
+    // Count every verification attempt independently from OTP comparison.
+    await this.incrementOtpAttempts(attemptsKey, otpTtlSeconds);
 
-    if (!storedOtp) {
-      throw new BadRequestException('OTP đã hết hạn');
-    }
-
-    // FIX: Timing-safe comparison using crypto
+    // Avoid leaking OTP correctness through timing differences.
     const { timingSafeEqual } = await import('crypto');
     const storedOtpBuffer = Buffer.from(storedOtp, 'utf8');
     const submittedOtpBuffer = Buffer.from(otp, 'utf8');
@@ -361,11 +372,7 @@ export class AuthService {
     if (!match) {
       throw new BadRequestException('Mã OTP không hợp lệ');
     }
-
-    // Clean up Redis
-    await this.redis.del(`otp:${email}`, `otp_attempts:${email}`);
-
-    // Find user
+    await this.redis.del(otpKey, attemptsKey);
     const user = await this.prisma.user.findUnique({
       where: { email },
     });
@@ -373,8 +380,6 @@ export class AuthService {
     if (!user) {
       throw new BadRequestException('OTP đã hết hạn');
     }
-
-    // Generate reset token (short-lived JWT with purpose claim)
     const jti = uuidv4();
     const resetToken = this.jwtService.sign(
       {
@@ -388,37 +393,26 @@ export class AuthService {
     return { reset_token: resetToken };
   }
 
-  // ─── RESET PASSWORD ───────────────────────────────────────────────────────
-
   async resetPassword(resetToken: string, newPassword: string): Promise<void> {
-    // Verify the reset token
     let payload: ResetTokenPayload;
     try {
       payload = this.jwtService.verify<ResetTokenPayload>(resetToken);
     } catch {
       throw new UnauthorizedException('Token không hợp lệ hoặc đã hết hạn');
     }
-
-    // Check purpose
     if (payload.purpose !== 'reset_password') {
       throw new UnauthorizedException('Token không hợp lệ');
     }
-
-    // Check if token has been used (blacklisted)
     const isBlacklisted = await this.redis.get(`blacklist:${payload.jti}`);
     if (isBlacklisted) {
       throw new UnauthorizedException('Token đã được sử dụng');
     }
-
-    // Hash new password
     const passwordHash = await argon2.hash(newPassword, {
       type: argon2.argon2id,
       memoryCost: 65536,
       timeCost: 3,
       parallelism: 1,
     });
-
-    // Update password and invalidate all sessions
     await this.prisma.$transaction([
       this.prisma.user.update({
         where: { id: payload.sub },
@@ -432,19 +426,15 @@ export class AuthService {
       }),
     ]);
 
-    // Blacklist the reset token for its remaining lifetime
+    // Reset tokens are single-use for their remaining lifetime.
     const remainingTtl = payload.exp - Math.floor(Date.now() / 1000);
     if (remainingTtl > 0) {
       await this.redis.set(`blacklist:${payload.jti}`, '1', 'EX', remainingTtl);
     }
-
-    // Audit log
-    await this.writeAuditLog(payload.sub, 'RESET_PASSWORD', 'auth', null, null);
+    this.writeAuditLog(payload.sub, 'RESET_PASSWORD', 'auth', null, null);
   }
 
-  // ─── TOKEN GENERATION ─────────────────────────────────────────────────────
-
-  async generateTokens(user: UserWithPlan): Promise<TokensResponse> {
+  generateTokens(user: UserWithPlan): TokensResponse {
     const jti = uuidv4();
 
     const jwtPayload: Omit<JwtPayload, 'iat' | 'exp'> = {
@@ -459,7 +449,7 @@ export class AuthService {
 
     const accessToken = this.jwtService.sign(jwtPayload);
 
-    // Refresh token is an opaque string, NOT a JWT
+    // Refresh tokens are opaque credentials; only their hash is stored.
     const refreshToken = `${uuidv4()}-${uuidv4()}`;
 
     return {
@@ -467,19 +457,20 @@ export class AuthService {
       refresh_token: refreshToken,
     };
   }
-
-  // ─── PRIVATE HELPERS ──────────────────────────────────────────────────────
-
-  /**
-   * SHA-256 hash a token string for secure storage.
-   */
   private hashToken(token: string): string {
     return createHash('sha256').update(token).digest('hex');
   }
-
-  /**
-   * Save a hashed refresh token to the database.
-   */
+  private async incrementOtpAttempts(
+    attemptsKey: string,
+    ttlSeconds: number,
+  ): Promise<void> {
+    const boundedTtlSeconds =
+      ttlSeconds > 0 ? ttlSeconds : RESET_OTP_TTL_SECONDS;
+    const pipeline = this.redis.pipeline();
+    pipeline.incr(attemptsKey);
+    pipeline.expire(attemptsKey, boundedTtlSeconds);
+    await pipeline.exec();
+  }
   private async saveRefreshToken(
     userId: number,
     rawToken: string,
@@ -487,8 +478,7 @@ export class AuthService {
     userAgent: string | null,
   ): Promise<void> {
     const tokenHash = this.hashToken(rawToken);
-    const expiresIn = this.configService.get<string>('jwt.refreshExpiresIn', '7d');
-    const expiresAt = new Date(Date.now() + this.parseExpiryToMs(expiresIn));
+    const expiresAt = this.getRefreshTokenExpiresAt();
 
     await this.prisma.refreshToken.create({
       data: {
@@ -500,14 +490,30 @@ export class AuthService {
       },
     });
   }
+  private getRefreshTokenExpiresAt(): Date {
+    const expiresIn = this.configService.get<string>(
+      'jwt.refreshExpiresIn',
+      '7d',
+    );
 
-  /**
-   * Parse a duration string like "7d", "15m", "1h" to milliseconds.
-   */
+    return new Date(Date.now() + this.parseExpiryToMs(expiresIn));
+  }
+  private async rejectRefreshTokenReuse(userId: number): Promise<never> {
+    await this.revokeActiveRefreshTokens(userId);
+    throw new UnauthorizedException(
+      'Security alert: Token reuse detected. All sessions revoked.',
+    );
+  }
+  private async revokeActiveRefreshTokens(userId: number): Promise<void> {
+    await this.prisma.refreshToken.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+  }
   private parseExpiryToMs(expiry: string): number {
     const match = expiry.match(/^(\d+)([smhd])$/);
     if (!match) {
-      return 7 * 24 * 60 * 60 * 1000; // default 7 days
+      return 7 * 24 * 60 * 60 * 1000;
     }
     const value = parseInt(match[1], 10);
     const unit = match[2];
@@ -519,10 +525,6 @@ export class AuthService {
     };
     return value * (multipliers[unit] ?? multipliers['d']);
   }
-
-  /**
-   * Build a safe user profile object (no sensitive fields).
-   */
   private buildUserProfile(user: UserWithPlan): UserProfile {
     return {
       id: user.id,
@@ -545,7 +547,7 @@ export class AuthService {
     };
   }
 
-  // FIX: Fire-and-forget audit log via BullMQ queue — non-blocking
+  // Audit logging must not block authentication flows.
   private writeAuditLog(
     userId: number | null,
     action: string,
@@ -560,7 +562,8 @@ export class AuthService {
         { attempts: 3, backoff: { type: 'exponential', delay: 1000 } },
       )
       .catch((error: Error) => {
-        this.logger.error(`Failed to queue audit log: ${error.message}`);
+        const message = getSafeErrorLogMessage(error);
+        this.logger.error(`Failed to queue audit log: ${message}`);
       });
   }
 }

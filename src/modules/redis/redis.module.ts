@@ -1,6 +1,15 @@
-import { Module, Global, OnModuleDestroy, Inject, Logger } from '@nestjs/common';
+import {
+  Module,
+  Global,
+  OnModuleDestroy,
+  Inject,
+  Logger,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
+import { getSafeErrorLogMessage } from '../../common/utils/log-redaction';
+
+const UNKNOWN_REDIS_DISCONNECT_ERROR = 'Unknown Redis disconnect error';
 
 @Global()
 @Module({
@@ -28,8 +37,12 @@ export class RedisModule implements OnModuleDestroy {
     try {
       await this.redis.quit();
       this.logger.log('Redis client disconnected gracefully');
-    } catch (err: any) {
-      this.logger.error(`Error during Redis disconnect: ${err.message}`);
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error
+          ? getSafeErrorLogMessage(error)
+          : UNKNOWN_REDIS_DISCONNECT_ERROR;
+      this.logger.error(`Error during Redis disconnect: ${message}`);
     }
   }
 }

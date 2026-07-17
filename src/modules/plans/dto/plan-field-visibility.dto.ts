@@ -1,5 +1,3 @@
-// DTOs for PlanFieldVisibility
-
 import { IsOptional, IsString, IsInt } from 'class-validator';
 
 export class CreatePlanFieldVisibilityDto {
@@ -105,21 +103,17 @@ export class UpdatePlanFieldVisibilityDto {
   portfolioTableDescription?: string;
 }
 
-export class PlanFieldVisibilityResponseDto {
-  id: number;
-  planId: number;
-  dashboardTitle?: string;
-  dashboardDescription?: string;
-  performanceTitle?: string;
-  performanceDescription?: string;
-  portfolioCompositionTitle?: string;
-  portfolioCompositionDescription?: string;
-  targetInfoTitle?: string;
-  targetInfoDescription?: string;
-  analysisTitle?: string;
-  analysisDescription?: string;
-  portfolioTableTitle?: string;
-  portfolioTableDescription?: string;
-  createdAt: Date;
-  updatedAt: Date;
+export class FieldVisibilityResponseDto {
+  dashboardTitle: string | null;
+  dashboardDescription: string | null;
+  performanceTitle: string | null;
+  performanceDescription: string | null;
+  portfolioCompositionTitle: string | null;
+  portfolioCompositionDescription: string | null;
+  targetInfoTitle: string | null;
+  targetInfoDescription: string | null;
+  analysisTitle: string | null;
+  analysisDescription: string | null;
+  portfolioTableTitle: string | null;
+  portfolioTableDescription: string | null;
 }

@@ -6,6 +6,7 @@ node_modules
 .env.production
 dist
 coverage
+*.tsbuildinfo
 *.log
 .github
 README.md

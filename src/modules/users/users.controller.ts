@@ -1,7 +1,6 @@
 import {
   Controller,
   Get,
-  Post,
   Patch,
   Delete,
   Param,
@@ -18,6 +17,7 @@ import {
   ApiResponse,
   ApiBearerAuth,
 } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 import { Role } from '@prisma/client';
 import { FastifyRequest } from 'fastify';
 
@@ -31,10 +31,8 @@ import { AdminUpdateUserDto } from './dto/admin-update-user.dto';
 import { UserListQueryDto } from './dto/user-query.dto';
 import { UpdateRoleDto } from './dto/update-role.dto';
 import { AssignPlanDto } from './dto/assign-plan.dto';
-import {
-  UserResponseDto,
-  PaginatedUsersDto,
-} from './dto/user-response.dto';
+import { UserResponseDto, PaginatedUsersDto } from './dto/user-response.dto';
+import { CommandMessageResponseDto } from '../../common/dto/command-response.dto';
 
 @ApiTags('Users')
 @Controller('users')
@@ -49,15 +47,17 @@ export class UsersController {
     summary: 'Xóa tài khoản (Admin)',
     description: 'Xóa vĩnh viễn một tài khoản người dùng.',
   })
-  @ApiResponse({ status: 200, description: 'Tài khoản đã bị xóa' })
+  @ApiResponse({
+    status: 200,
+    description: 'Tài khoản đã bị xóa',
+    type: CommandMessageResponseDto,
+  })
   async deleteUser(
     @Param('id', ParseIntPipe) id: number,
-  ): Promise<{ message: string }> {
+  ): Promise<CommandMessageResponseDto> {
     await this.usersService.deleteUser(id);
     return { message: 'Tài khoản đã bị xóa thành công' };
   }
-
-  // ─── ADMIN: GET ALL USERS ─────────────────────────────────────────────────
 
   @Get()
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -89,9 +89,8 @@ export class UsersController {
     return this.usersService.findAll(normalized);
   }
 
-  // ─── USER: GET OWN PROFILE ────────────────────────────────────────────────
-
   @Get('me')
+  @SkipThrottle({ default: true, medium: true, long: true })
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({
@@ -105,8 +104,6 @@ export class UsersController {
     }
     return this.usersService.getProfile(req.user.sub);
   }
-
-  // ─── USER: UPDATE OWN PROFILE ─────────────────────────────────────────────
 
   @Patch('me')
   @UseGuards(JwtAuthGuard)
@@ -126,8 +123,6 @@ export class UsersController {
     return this.usersService.updateProfile(req.user.sub, dto);
   }
 
-  // ─── ADMIN: GET USER BY ID ────────────────────────────────────────────────
-
   @Get(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.admin)
@@ -137,11 +132,11 @@ export class UsersController {
     description: 'Xem thông tin chi tiết một người dùng.',
   })
   @ApiResponse({ status: 200, type: UserResponseDto })
-  async findOne(@Param('id', ParseIntPipe) id: number): Promise<UserResponseDto> {
+  async findOne(
+    @Param('id', ParseIntPipe) id: number,
+  ): Promise<UserResponseDto> {
     return this.usersService.findOne(id);
   }
-
-  // ─── ADMIN: UPDATE USER PROFILE ──────────────────────────────────────────
 
   @Patch(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -160,15 +155,14 @@ export class UsersController {
     return this.usersService.adminUpdateUser(id, dto);
   }
 
-  // ─── ADMIN: UPDATE USER ROLE ──────────────────────────────────────────────
-
   @Patch(':id/role')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.admin)
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Cập nhật phân quyền người dùng (Admin)',
-    description: 'Thay đổi role của người dùng. Không thể tự đổi role chính mình.',
+    description:
+      'Thay đổi role của người dùng. Không thể tự đổi role chính mình.',
   })
   @ApiResponse({ status: 200, type: UserResponseDto })
   async updateRole(
@@ -181,8 +175,6 @@ export class UsersController {
     }
     return this.usersService.updateRole(req.user.sub, id, dto.role);
   }
-
-  // ─── ADMIN: ASSIGN PLAN TO USER ───────────────────────────────────────────
 
   @Patch(':id/plan')
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -200,8 +192,6 @@ export class UsersController {
     return this.usersService.assignPlan(id, dto.planId);
   }
 
-  // ─── ADMIN: BLOCK USER ────────────────────────────────────────────────────
-
   @Patch(':id/block')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.admin)
@@ -210,19 +200,21 @@ export class UsersController {
     summary: 'Khóa tài khoản (Admin)',
     description: 'Khóa người dùng và buộc đăng xuất.',
   })
-  @ApiResponse({ status: 200, description: 'Tài khoản đã bị khóa' })
+  @ApiResponse({
+    status: 200,
+    description: 'Tài khoản đã bị khóa',
+    type: CommandMessageResponseDto,
+  })
   async blockUser(
     @Req() req: FastifyRequest,
     @Param('id', ParseIntPipe) id: number,
-  ): Promise<{ message: string }> {
+  ): Promise<CommandMessageResponseDto> {
     if (!req.user) {
       throw new UnauthorizedException('Authentication required');
     }
     await this.usersService.blockUser(req.user.sub, id);
     return { message: 'Tài khoản đã bị khóa thành công' };
   }
-
-  // ─── ADMIN: UNBLOCK USER ──────────────────────────────────────────────────
 
   @Patch(':id/unblock')
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -232,10 +224,14 @@ export class UsersController {
     summary: 'Mở khóa tài khoản (Admin)',
     description: 'Mở khóa cho người dùng đã bị khóa.',
   })
-  @ApiResponse({ status: 200, description: 'Tài khoản đã được mở khóa' })
+  @ApiResponse({
+    status: 200,
+    description: 'Tài khoản đã được mở khóa',
+    type: CommandMessageResponseDto,
+  })
   async unblockUser(
     @Param('id', ParseIntPipe) id: number,
-  ): Promise<{ message: string }> {
+  ): Promise<CommandMessageResponseDto> {
     await this.usersService.unblockUser(id);
     return { message: 'Tài khoản đã được mở khóa thành công' };
   }

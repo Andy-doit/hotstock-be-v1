@@ -44,6 +44,8 @@ services:
   app:
     image: ghcr.io/${GITHUB_REPOSITORY}/backend:${TAG:-latest}
     env_file: .env.staging
+    environment:
+      PORT: 3000
     deploy:
       replicas: 2
     restart: always

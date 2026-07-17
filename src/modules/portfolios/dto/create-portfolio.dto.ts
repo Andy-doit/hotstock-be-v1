@@ -13,8 +13,6 @@ import {
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
-// ─── Nested DTOs ────────────────────────────────────────────────────────────
-
 export class PortfolioStockDto {
   @ApiProperty({ example: 'VNM' })
   @IsString()
@@ -110,14 +108,15 @@ export class PortfolioSignalDto {
   stopLoss?: number;
 }
 
-// ─── Main DTO ───────────────────────────────────────────────────────────────
-
 export class CreatePortfolioDto {
   @ApiProperty({ example: 1, description: 'ID gói' })
   @IsInt({ message: 'planId phải là số nguyên' })
   planId: number;
 
-  @ApiProperty({ example: '2024-06-15T00:00:00.000Z', description: 'Ngày công bố' })
+  @ApiProperty({
+    example: '2024-06-15T00:00:00.000Z',
+    description: 'Ngày công bố',
+  })
   @IsDateString({}, { message: 'Ngày công bố không hợp lệ' })
   publishedAt: string;
 
@@ -127,7 +126,10 @@ export class CreatePortfolioDto {
   @Type(() => PortfolioStockDto)
   stocks: PortfolioStockDto[];
 
-  @ApiProperty({ type: [PortfolioInformationDto], description: 'Thông tin hiệu suất' })
+  @ApiProperty({
+    type: [PortfolioInformationDto],
+    description: 'Thông tin hiệu suất',
+  })
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => PortfolioInformationDto)
@@ -139,7 +141,10 @@ export class CreatePortfolioDto {
   @Type(() => PortfolioReasonDto)
   reasons: PortfolioReasonDto[];
 
-  @ApiProperty({ type: [PortfolioSignalDto], description: 'Tín hiệu giao dịch' })
+  @ApiProperty({
+    type: [PortfolioSignalDto],
+    description: 'Tín hiệu giao dịch',
+  })
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => PortfolioSignalDto)

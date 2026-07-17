@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
+import { getSafeErrorLogStack } from '../../common/utils/log-redaction';
 
 @Injectable()
 export class CleanupService {
@@ -8,11 +9,12 @@ export class CleanupService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  /**
-   * Run every night at midnight to clean up expired tokens.
-   */
+  private getErrorStack(error: unknown): string | undefined {
+    return getSafeErrorLogStack(error);
+  }
+
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
-  async handleExpiredTokens() {
+  async handleExpiredTokens(): Promise<void> {
     this.logger.log('Starting cleanup of expired refresh tokens...');
     try {
       const result = await this.prisma.refreshToken.deleteMany({
@@ -21,16 +23,16 @@ export class CleanupService {
         },
       });
       this.logger.log(`Cleaned up ${result.count} expired refresh tokens.`);
-    } catch (error: any) {
-      this.logger.error('Failed to clean up refresh tokens', error.stack);
+    } catch (error: unknown) {
+      this.logger.error(
+        'Failed to clean up refresh tokens',
+        this.getErrorStack(error),
+      );
     }
   }
 
-  /**
-   * Run every night at 1:00 AM to clean up expired OTPs in users table.
-   */
   @Cron('0 1 * * *')
-  async handleExpiredOTPs() {
+  async handleExpiredOTPs(): Promise<void> {
     this.logger.log('Starting cleanup of expired reset password OTPs...');
     try {
       const result = await this.prisma.user.updateMany({
@@ -44,16 +46,13 @@ export class CleanupService {
         },
       });
       this.logger.log(`Cleaned up OTPs for ${result.count} users.`);
-    } catch (error: any) {
-      this.logger.error('Failed to clean up OTPs', error.stack);
+    } catch (error: unknown) {
+      this.logger.error('Failed to clean up OTPs', this.getErrorStack(error));
     }
   }
 
-  /**
-   * Run every night at 2:00 AM to delete audit logs older than 30 days.
-   */
   @Cron('0 2 * * *')
-  async handleOldAuditLogs() {
+  async handleOldAuditLogs(): Promise<void> {
     this.logger.log('Starting cleanup of old audit logs (> 30 days)...');
     try {
       const thirtyDaysAgo = new Date();
@@ -65,8 +64,11 @@ export class CleanupService {
         },
       });
       this.logger.log(`Cleaned up ${result.count} old audit logs.`);
-    } catch (error: any) {
-      this.logger.error('Failed to clean up audit logs', error.stack);
+    } catch (error: unknown) {
+      this.logger.error(
+        'Failed to clean up audit logs',
+        this.getErrorStack(error),
+      );
     }
   }
 }

@@ -5,19 +5,12 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import { FastifyRequest } from 'fastify';
 import { REQUIRED_PLAN_LEVEL_KEY } from '../decorators/required-plan.decorator';
 import { JwtPayload } from '../../modules/auth/interfaces/jwt-payload.interface';
 
-/**
- * Guard that checks if the authenticated user's plan level meets the minimum
- * required plan level for the route.
- *
- * Must be used AFTER JwtAuthGuard so that request.user is populated.
- *
- * Usage:
- *   @UseGuards(JwtAuthGuard, PlanGuard)
- *   @RequiredPlan(2)
- */
+type AuthenticatedRequest = FastifyRequest & { user?: JwtPayload };
+
 @Injectable()
 export class PlanGuard implements CanActivate {
   constructor(private readonly reflector: Reflector) {}
@@ -27,14 +20,12 @@ export class PlanGuard implements CanActivate {
       REQUIRED_PLAN_LEVEL_KEY,
       [context.getHandler(), context.getClass()],
     );
-
-    // If no @RequiredPlan() decorator is set, allow through
     if (requiredLevel === undefined || requiredLevel === null) {
       return true;
     }
 
-    const request = context.switchToHttp().getRequest();
-    const user = request.user as JwtPayload | undefined;
+    const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
+    const user = request.user;
 
     const userPlanLevel = user?.planLevel ?? 0;
 

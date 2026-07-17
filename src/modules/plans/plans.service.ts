@@ -6,17 +6,28 @@ import {
   Inject,
   Logger,
 } from '@nestjs/common';
-import { Plan } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import Redis from 'ioredis';
 import { PrismaService } from '../../prisma/prisma.service';
 import { clearCache } from '../../common/interceptors/cache.interceptor';
 import { safeJsonParse } from '../../common/utils/safe-json-parse';
 import { CreatePlanDto } from './dto/create-plan.dto';
 import { UpdatePlanDto } from './dto/update-plan.dto';
+import { SubscriptionPlanResponseDto } from './dto/plan-response.dto';
 import {
   CreatePlanFieldVisibilityDto,
+  FieldVisibilityResponseDto,
   UpdatePlanFieldVisibilityDto,
 } from './dto/plan-field-visibility.dto';
+
+type PlanWithFieldVisibility = Prisma.PlanGetPayload<{
+  include: { fieldVisibilities: true };
+}>;
+type PlanFieldVisibilityRecord = NonNullable<
+  PlanWithFieldVisibility['fieldVisibilities']
+>;
+
+const PLAN_LIST_LIMIT = 50;
 
 @Injectable()
 export class PlansService {
@@ -26,18 +37,16 @@ export class PlansService {
     private readonly prisma: PrismaService,
     @Inject('REDIS_CLIENT') private readonly redis: Redis,
   ) {}
+  async findAll(): Promise<SubscriptionPlanResponseDto[]> {
+    const cacheKey = 'plans:active:v5';
 
-  /**
-   * Return all active plans, ordered by sortOrder asc.
-   * Cached in Redis for 24 hours.
-   */
-  async findAll(): Promise<Plan[]> {
-    const cacheKey = 'plans:active:v3';
-
-    // Check service-level cache
     const cached = await this.redis.get(cacheKey);
     if (cached) {
-      const parsed = safeJsonParse<Plan[]>(cached, this.logger, cacheKey);
+      const parsed = safeJsonParse<SubscriptionPlanResponseDto[]>(
+        cached,
+        this.logger,
+        cacheKey,
+      );
       if (parsed) {
         this.logger.debug('Plans findAll: cache hit');
         return parsed;
@@ -48,31 +57,26 @@ export class PlansService {
       where: { isActive: true },
       include: { fieldVisibilities: true },
       orderBy: { sortOrder: 'asc' },
+      take: PLAN_LIST_LIMIT,
     });
 
-    // Cache for 24 hours
-    await this.redis.set(cacheKey, JSON.stringify(plans), 'EX', 86400);
+    const response = plans.map((plan) => this.mapPlan(plan));
+
+    await this.redis.set(cacheKey, JSON.stringify(response), 'EX', 86400);
     this.logger.debug(`Plans findAll: cached ${plans.length} plans`);
 
-    return plans;
+    return response;
   }
-
-  /**
-   * Return ALL plans (including inactive) for admin dashboard.
-   * No caching — admin needs fresh data.
-   */
-  async findAllAdmin(): Promise<Plan[]> {
-    return this.prisma.plan.findMany({
+  async findAllAdmin(): Promise<SubscriptionPlanResponseDto[]> {
+    const plans = await this.prisma.plan.findMany({
       include: { fieldVisibilities: true },
       orderBy: { sortOrder: 'asc' },
+      take: PLAN_LIST_LIMIT,
     });
-  }
 
-  /**
-   * Find a single plan by slug.
-   * @throws NotFoundException if not found.
-   */
-  async findBySlug(slug: string): Promise<Plan> {
+    return plans.map((plan) => this.mapPlan(plan));
+  }
+  async findBySlug(slug: string): Promise<SubscriptionPlanResponseDto> {
     const plan = await this.prisma.plan.findUnique({
       where: { slug },
       include: { fieldVisibilities: true },
@@ -82,15 +86,9 @@ export class PlansService {
       throw new NotFoundException('Không tìm thấy gói');
     }
 
-    return plan;
+    return this.mapPlan(plan);
   }
-
-  /**
-   * Create a new plan.
-   * @throws ConflictException if slug already taken.
-   */
-  async create(dto: CreatePlanDto): Promise<Plan> {
-    // Check slug uniqueness
+  async create(dto: CreatePlanDto): Promise<SubscriptionPlanResponseDto> {
     const existing = await this.prisma.plan.findUnique({
       where: { slug: dto.slug },
     });
@@ -148,15 +146,12 @@ export class PlansService {
     });
 
     await this.invalidateCache();
-    return plan;
+    return this.mapPlan(plan);
   }
-
-  /**
-   * Update a plan by slug.
-   * slug and level are immutable — any values in dto are ignored.
-   * @throws NotFoundException if not found.
-   */
-  async update(slug: string, dto: UpdatePlanDto): Promise<Plan> {
+  async update(
+    slug: string,
+    dto: UpdatePlanDto,
+  ): Promise<SubscriptionPlanResponseDto> {
     const existing = await this.prisma.plan.findUnique({
       where: { slug },
     });
@@ -199,8 +194,7 @@ export class PlansService {
                     dto.fieldVisibility.portfolioCompositionTitle ?? null,
                   portfolioCompositionDescription:
                     dto.fieldVisibility.portfolioCompositionDescription ?? null,
-                  targetInfoTitle:
-                    dto.fieldVisibility.targetInfoTitle ?? null,
+                  targetInfoTitle: dto.fieldVisibility.targetInfoTitle ?? null,
                   targetInfoDescription:
                     dto.fieldVisibility.targetInfoDescription ?? null,
                   analysisTitle: dto.fieldVisibility.analysisTitle ?? null,
@@ -226,10 +220,8 @@ export class PlansService {
                   targetInfoDescription:
                     dto.fieldVisibility.targetInfoDescription,
                   analysisTitle: dto.fieldVisibility.analysisTitle,
-                  analysisDescription:
-                    dto.fieldVisibility.analysisDescription,
-                  portfolioTableTitle:
-                    dto.fieldVisibility.portfolioTableTitle,
+                  analysisDescription: dto.fieldVisibility.analysisDescription,
+                  portfolioTableTitle: dto.fieldVisibility.portfolioTableTitle,
                   portfolioTableDescription:
                     dto.fieldVisibility.portfolioTableDescription,
                 },
@@ -241,13 +233,13 @@ export class PlansService {
     });
 
     await this.invalidateCache();
-    return plan;
+    return this.mapPlan(plan);
   }
 
   async upsertFieldVisibility(
     slug: string,
     dto: CreatePlanFieldVisibilityDto | UpdatePlanFieldVisibilityDto,
-  ) {
+  ): Promise<FieldVisibilityResponseDto> {
     const plan = await this.prisma.plan.findUnique({
       where: { slug },
     });
@@ -264,8 +256,7 @@ export class PlansService {
         dashboardDescription: dto.dashboardDescription ?? null,
         performanceTitle: dto.performanceTitle ?? null,
         performanceDescription: dto.performanceDescription ?? null,
-        portfolioCompositionTitle:
-          dto.portfolioCompositionTitle ?? null,
+        portfolioCompositionTitle: dto.portfolioCompositionTitle ?? null,
         portfolioCompositionDescription:
           dto.portfolioCompositionDescription ?? null,
         targetInfoTitle: dto.targetInfoTitle ?? null,
@@ -273,8 +264,7 @@ export class PlansService {
         analysisTitle: dto.analysisTitle ?? null,
         analysisDescription: dto.analysisDescription ?? null,
         portfolioTableTitle: dto.portfolioTableTitle ?? null,
-        portfolioTableDescription:
-          dto.portfolioTableDescription ?? null,
+        portfolioTableDescription: dto.portfolioTableDescription ?? null,
       },
       update: {
         dashboardTitle: dto.dashboardTitle,
@@ -282,8 +272,7 @@ export class PlansService {
         performanceTitle: dto.performanceTitle,
         performanceDescription: dto.performanceDescription,
         portfolioCompositionTitle: dto.portfolioCompositionTitle,
-        portfolioCompositionDescription:
-          dto.portfolioCompositionDescription,
+        portfolioCompositionDescription: dto.portfolioCompositionDescription,
         targetInfoTitle: dto.targetInfoTitle,
         targetInfoDescription: dto.targetInfoDescription,
         analysisTitle: dto.analysisTitle,
@@ -294,14 +283,8 @@ export class PlansService {
     });
 
     await this.invalidateCache();
-    return visibility;
+    return this.mapFieldVisibility(visibility);
   }
-
-  /**
-   * Remove a plan by slug.
-   * @throws NotFoundException if not found.
-   * @throws BadRequestException if plan has users assigned.
-   */
   async remove(slug: string): Promise<void> {
     const plan = await this.prisma.plan.findUnique({
       where: { slug },
@@ -310,8 +293,6 @@ export class PlansService {
     if (!plan) {
       throw new NotFoundException('Không tìm thấy gói');
     }
-
-    // Check if any users are assigned to this plan
     const userCount = await this.prisma.user.count({
       where: { planId: plan.id },
     });
@@ -328,14 +309,71 @@ export class PlansService {
 
     await this.invalidateCache();
   }
-
-  /**
-   * Invalidate both service-level and interceptor-level cache for plans.
-   */
   private async invalidateCache(): Promise<void> {
     await this.redis.del('plans:active');
     await this.redis.del('plans:active:v2');
     await this.redis.del('plans:active:v3');
+    await this.redis.del('plans:active:v4');
+    await this.redis.del('plans:active:v5');
     await clearCache(this.redis, 'cache:*plans*');
+  }
+
+  private mapPlan(plan: PlanWithFieldVisibility): SubscriptionPlanResponseDto {
+    return {
+      id: plan.id,
+      name: plan.name,
+      slug: plan.slug,
+      level: plan.level,
+      tagline: plan.tagline,
+      icon: plan.icon,
+      theme: plan.theme,
+      badge: plan.badge,
+      monthlyPrice: plan.monthlyPrice,
+      semiAnnualPrice: plan.semiAnnualPrice,
+      originalPrice: plan.originalPrice,
+      discountPercent: plan.discountPercent,
+      description: plan.description,
+      features: this.mapFeatures(plan.features),
+      ctaLabel: plan.ctaLabel,
+      isPopular: plan.isPopular,
+      highlighted: plan.highlighted,
+      isActive: plan.isActive,
+      sortOrder: plan.sortOrder,
+      fieldVisibilities: plan.fieldVisibilities
+        ? this.mapFieldVisibility(plan.fieldVisibilities)
+        : null,
+      createdAt: plan.createdAt,
+      updatedAt: plan.updatedAt,
+    };
+  }
+
+  private mapFieldVisibility(
+    visibility: PlanFieldVisibilityRecord,
+  ): FieldVisibilityResponseDto {
+    return {
+      dashboardTitle: visibility.dashboardTitle,
+      dashboardDescription: visibility.dashboardDescription,
+      performanceTitle: visibility.performanceTitle,
+      performanceDescription: visibility.performanceDescription,
+      portfolioCompositionTitle: visibility.portfolioCompositionTitle,
+      portfolioCompositionDescription:
+        visibility.portfolioCompositionDescription,
+      targetInfoTitle: visibility.targetInfoTitle,
+      targetInfoDescription: visibility.targetInfoDescription,
+      analysisTitle: visibility.analysisTitle,
+      analysisDescription: visibility.analysisDescription,
+      portfolioTableTitle: visibility.portfolioTableTitle,
+      portfolioTableDescription: visibility.portfolioTableDescription,
+    };
+  }
+
+  private mapFeatures(features: Prisma.JsonValue): string[] {
+    if (!Array.isArray(features)) {
+      return [];
+    }
+
+    return features.filter((feature): feature is string => {
+      return typeof feature === 'string';
+    });
   }
 }
