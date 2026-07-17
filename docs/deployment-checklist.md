@@ -35,7 +35,15 @@ Seeding is intentionally separate from `npm run db:migrate:deploy`. Production c
 npx prisma migrate deploy
 ```
 
-If production seed data is required, build the application image first and run the production-safe seed command after the image has compiled `prisma/seed.ts`:
+Run production seed only once when bootstrapping a fresh database, or run it manually later only when you intentionally want to refresh seed-managed data. Normal code deployments should not run seed again; they should run migrations and start the app.
+
+The seed script creates the base plan/portfolio data and one admin account:
+
+```text
+HotstockAdmin@gmail.com
+```
+
+Set the admin password with `SEED_ADMIN_PASSWORD` before running seed. If production seed data is required, build the application image first and run the production-safe seed command after the image has compiled `prisma/seed.ts`:
 
 ```bash
 npm run db:seed:prod

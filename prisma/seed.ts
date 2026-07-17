@@ -568,85 +568,6 @@ async function seedPlanVisibilities(): Promise<void> {
   }
 }
 
-async function seedUsers(seedAdminPassword: string): Promise<void> {
-  const defaultPassword = process.env.SEED_TEST_USER_PASSWORD || seedAdminPassword;
-  const passwordHash = await hashPassword(defaultPassword);
-
-  const planEntries = await prisma.plan.findMany({
-    where: { slug: { in: ['free', 'titan', 'premium', 'gold'] } },
-  });
-
-  const planIdBySlug = Object.fromEntries(
-    planEntries.map((plan) => [plan.slug, plan.id]),
-  );
-
-  const users = [
-    {
-      email: 'titan.user@app.com',
-      username: 'titan_user',
-      fullName: 'Titan Test User',
-      role: Role.user,
-      planSlug: 'titan',
-    },
-    {
-      email: 'premium.user@app.com',
-      username: 'premium_user',
-      fullName: 'Premium Test User',
-      role: Role.user,
-      planSlug: 'premium',
-    },
-    {
-      email: 'gold.user@app.com',
-      username: 'gold_user',
-      fullName: 'Gold Test User',
-      role: Role.user,
-      planSlug: 'gold',
-    },
-  ];
-
-  for (const user of users) {
-    const planId = planIdBySlug[user.planSlug];
-
-    if (!planId) {
-      const userLabel = maskEmail(user.email);
-      console.warn(
-        `  ⚠️ Skip user "${userLabel}" because plan "${user.planSlug}" was not found`,
-      );
-      continue;
-    }
-
-    const upserted = await prisma.user.upsert({
-      where: { email: user.email },
-      update: {
-        username: user.username,
-        fullName: user.fullName,
-        role: user.role,
-        planId,
-        passwordHash,
-        blocked: false,
-        confirmed: true,
-      },
-      create: {
-        email: user.email,
-        username: user.username,
-        fullName: user.fullName,
-        role: user.role,
-        planId,
-        passwordHash,
-        blocked: false,
-        confirmed: true,
-      },
-    });
-
-    const seededUserLabel = maskEmail(upserted.email);
-    console.log(
-      `  ✅ Test user "${seededUserLabel}" attached to plan "${user.planSlug}"`,
-    );
-  }
-
-  console.log('  ℹ️ Test users seeded with configured password');
-}
-
 async function seedPortfolios(): Promise<void> {
   for (const [planSlug, data] of Object.entries(portfolioSeedByPlan)) {
     const plan = await prisma.plan.findUnique({ where: { slug: planSlug } });
@@ -752,6 +673,7 @@ async function main(): Promise<void> {
   console.log('🌱 Starting seed...');
   const forceSeed = process.env.SEED_FORCE === 'true';
   const configuredAdminPassword = process.env.SEED_ADMIN_PASSWORD;
+  const adminEmail = 'HotstockAdmin@gmail.com';
 
   if (!configuredAdminPassword || configuredAdminPassword.length < 12) {
     throw new Error(
@@ -759,14 +681,8 @@ async function main(): Promise<void> {
     );
   }
 
-  const existingAdmin = await prisma.user.findFirst({
-    where: {
-      OR: [
-        { email: 'admin@app.com' },
-        { email: 'adminHotstock@gmail.com' },
-        { email: 'hotstockadmin@gmail.com' },
-      ],
-    },
+  const existingAdmin = await prisma.user.findUnique({
+    where: { email: adminEmail },
     select: { id: true, email: true },
   });
 
@@ -827,16 +743,19 @@ async function main(): Promise<void> {
   const adminPasswordHash = await hashPassword(adminPassword);
 
   const admin = await prisma.user.upsert({
-    where: { email: 'admin@app.com' },
+    where: { email: adminEmail },
     update: {
+      username: 'hotstockadmin',
+      fullName: 'Hotstock Admin',
       passwordHash: adminPasswordHash,
       role: Role.admin,
       blocked: false,
       confirmed: true,
     },
     create: {
-      email: 'admin@app.com',
-      username: 'admin',
+      email: adminEmail,
+      username: 'hotstockadmin',
+      fullName: 'Hotstock Admin',
       role: Role.admin,
       passwordHash: adminPasswordHash,
       blocked: false,
@@ -846,59 +765,6 @@ async function main(): Promise<void> {
   const adminLabel = maskEmail(admin.email);
   console.log(`  ✅ Admin user "${adminLabel}" (id: ${admin.id})`);
 
-  const customAdminPassword = configuredAdminPassword;
-  const customAdminPasswordHash = await hashPassword(customAdminPassword);
-
-  const customAdmin = await prisma.user.upsert({
-    where: { email: 'adminHotstock@gmail.com' },
-    update: {
-      passwordHash: customAdminPasswordHash,
-      role: Role.admin,
-      blocked: false,
-      confirmed: true,
-    },
-    create: {
-      email: 'adminHotstock@gmail.com',
-      username: 'adminHotstock',
-      fullName: 'Admin HotStock',
-      role: Role.admin,
-      passwordHash: customAdminPasswordHash,
-      blocked: false,
-      confirmed: true,
-    },
-  });
-  const customAdminLabel = maskEmail(customAdmin.email);
-  console.log(
-    `  ✅ Custom Admin user "${customAdminLabel}" (id: ${customAdmin.id})`,
-  );
-
-  // Requested admin account
-  const requestedAdminPassword = configuredAdminPassword;
-  const requestedAdminPasswordHash = await hashPassword(requestedAdminPassword);
-  const requestedAdmin = await prisma.user.upsert({
-    where: { email: 'hotstockadmin@gmail.com' },
-    update: {
-      passwordHash: requestedAdminPasswordHash,
-      role: Role.admin,
-      blocked: false,
-      confirmed: true,
-    },
-    create: {
-      email: 'hotstockadmin@gmail.com',
-      username: 'hotstockadmin',
-      fullName: 'Hotstock Admin',
-      role: Role.admin,
-      passwordHash: requestedAdminPasswordHash,
-      blocked: false,
-      confirmed: true,
-    },
-  });
-  const requestedAdminLabel = maskEmail(requestedAdmin.email);
-  console.log(
-    `  ✅ Requested Admin user "${requestedAdminLabel}" (id: ${requestedAdmin.id})`,
-  );
-
-  await seedUsers(configuredAdminPassword);
   await seedPortfolios();
 
   console.log('🌱 Seed completed successfully!');
